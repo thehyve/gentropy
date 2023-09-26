@@ -68,4 +68,14 @@ build: clean ## Build Python package with dependencies
 	@gsutil cp ./dist/${APP_NAME}-${VERSION_NO}-py3-none-any.whl ${BUCKET_NAME}
 	@gsutil cp ./dist/config.tar.gz ${BUCKET_NAME}
 	@gsutil cp ./utils/install_dependencies_on_cluster.sh ${BUCKET_NAME}
-	@gsutil -m cp -r 'dags/*' ${BUCKET_COMPOSER_DAGS}
+	@test -d dags && find dags -name '*.py' -exec gsutil -m cp {} ${BUCKET_COMPOSER_DAGS} \; || :
+
+run_step %: ## Run a specific step on the dev-cluster
+	@echo "DEBUG: step=$*"
+	@gcloud dataproc jobs submit pyspark \
+		"${BUCKET_NAME}/cli.py" \
+		--cluster="ot-genetics-dev-${CLEAN_VERSION_NO}" \
+		--project=${PROJECT_ID} \
+		--region=${REGION} \
+		--py-files="${BUCKET_NAME}/otgenetics-${VERSION_NO}-py3-none-any.whl" \
+		-- 'step=$*' '--config-dir=/config' '--config-name=my_config'
