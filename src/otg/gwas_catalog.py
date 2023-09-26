@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import hail as hl
-
 from otg.common.gwas_catalog_splitter import GWASCatalogSplitter
 from otg.common.session import Session
 from otg.config import GWASCatalogStepConfig
@@ -23,7 +21,6 @@ class GWASCatalogStep(GWASCatalogStepConfig):
 
     def run(self: GWASCatalogStep) -> None:
         """Run GWAS Catalog ingestion step to extract GWASCatalog Study and StudyLocus tables."""
-        hl.init(sc=self.session.spark.sparkContext, log="/dev/null")
         # All inputs:
         # Variant annotation dataset
         va = VariantAnnotation.from_parquet(self.session, self.variant_annotation_path)

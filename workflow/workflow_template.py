@@ -185,13 +185,13 @@ def pyspark_job_template(
         f"--config-name={ config_name }",
     ]
     # to provide hail support
-    job.pyspark_job.properties = {
-        "spark.jars": "/opt/conda/miniconda3/lib/python3.10/site-packages/hail/backend/hail-all-spark.jar",
-        "spark.driver.extraClassPath": "/opt/conda/miniconda3/lib/python3.10/site-packages/hail/backend/hail-all-spark.jar",
-        "spark.executor.extraClassPath": "./hail-all-spark.jar",
-        "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-        "spark.kryo.registrator": "is.hail.kryo.HailKryoRegistrator",
-    }
+    # job.pyspark_job.properties = {
+    #     "spark.jars": "/opt/conda/miniconda3/lib/python3.10/site-packages/hail/backend/hail-all-spark.jar",
+    #     "spark.driver.extraClassPath": "/opt/conda/miniconda3/lib/python3.10/site-packages/hail/backend/hail-all-spark.jar",
+    #     "spark.executor.extraClassPath": "./hail-all-spark.jar",
+    #     "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+    #     "spark.kryo.registrator": "is.hail.kryo.HailKryoRegistrator",
+    # }
     # dependency steps
     if "prerequisites" in step:
         job.prerequisite_step_ids = step["prerequisites"]
