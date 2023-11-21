@@ -33,6 +33,9 @@ class ProcessRecord(beam.DoFn):
         Args:
             record (Dict[str, Any]): Attribute dictionary for one file.
         """
+        # Required for correct processing in Dataflow.
+        import pandas as pd
+
         # Read the file specified by the record.
         assert (
             record["study"] == "GTEx_V8"
