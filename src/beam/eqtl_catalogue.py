@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 import apache_beam as beam
 import pandas as pd
+from apache_beam.options.pipeline_options import PipelineOptions
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
 EQTL_CATALOGUE_OUPUT_BASE = (
@@ -50,7 +51,7 @@ class ProcessRecord(beam.DoFn):
 
 def run_pipeline() -> None:
     """Define and run the Apache Beam pipeline."""
-    with beam.Pipeline() as pipeline:
+    with beam.Pipeline(options=PipelineOptions()) as pipeline:
         (pipeline | beam.Create(get_input_files()) | beam.ParDo(ProcessRecord()))
 
 
