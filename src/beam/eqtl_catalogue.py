@@ -11,6 +11,7 @@ from typing import IO, Any, Dict, Iterator, List
 import apache_beam as beam
 import pandas as pd
 import pyarrow
+from apache_beam.io import WriteToParquet
 from apache_beam.options.pipeline_options import PipelineOptions
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
@@ -55,14 +56,14 @@ def get_input_files() -> List[Dict[str, Any]]:
 class ParseData(beam.DoFn):
     """Process one input file and yield parsed rows."""
 
-    def process(self, record: Dict[str, Any]) -> Iterator[List[str]]:
+    def process(self, record: Dict[str, Any]) -> Iterator[tuple[str, dict[str, str]]]:
         """A non-blocking line-by-line iterator from a remote source.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
 
         Yields:
-            List[str]: List of field values for each row.
+            tuple[str, dict[str, str]]: QTL group and record dictionary.
         """
         assert (
             record["study"] == "GTEx_V8"
@@ -79,8 +80,27 @@ class ParseData(beam.DoFn):
                             continue
                         if i == 5:
                             break
-                        print(line)
-                        yield line.strip().split("\t")
+                        yield (
+                            record["qtl_group"],
+                            dict(zip(FIELDS, line.strip().split("\t"), strict=True)),
+                        )
+
+
+class WriteParquet(beam.DoFn):
+    """Write a record to Parquet format."""
+
+    def process(self, element: tuple[Any, Any]) -> None:
+        """Write a Parquet file for a given input file.
+
+        Args:
+            element (tuple[Any, Any]): key and grouped values.
+        """
+        qtl_group, records = element
+        records | WriteToParquet(
+            file_path_prefix=f"output_test_{qtl_group}",
+            file_name_suffix=".parquet",
+            schema=PYARROW_SCHEMA,
+        )
 
 
 class ProcessRecord(beam.DoFn):
@@ -109,8 +129,15 @@ def run_pipeline() -> None:
     with beam.Pipeline(options=PipelineOptions()) as pipeline:
         (
             pipeline
-            | beam.Create(get_input_files()[:2])
-            | beam.ParDo(ParseData())
+            | "Prepare list of input files" >> beam.Create(get_input_files()[:2])
+            | "Fetch, uncompress, and parse data" >> beam.ParDo(ParseData())
+            | "Group the data by input file" >> beam.GroupByKey()
+            | "Write to Parquet" >> beam.ParDo(WriteParquet())
+            # >> WriteToParquet(
+            #     file_path_prefix="output_test",
+            #     file_name_suffix=".parquet",
+            #     schema=PYARROW_SCHEMA,
+            # )
             # | beam.ParDo(ProcessRecord())
         )
 
