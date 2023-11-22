@@ -56,14 +56,16 @@ def get_input_files() -> List[Dict[str, Any]]:
 class ParseData(beam.DoFn):
     """Process one input file and yield parsed rows."""
 
-    def process(self, record: Dict[str, Any]) -> Iterator[tuple[str, dict[str, str]]]:
+    def process(
+        self, record: Dict[str, Any]
+    ) -> Iterator[tuple[tuple[str, str], dict[str, str]]]:
         """A non-blocking line-by-line iterator from a remote source.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
 
         Yields:
-            tuple[str, dict[str, str]]: QTL group and record dictionary.
+            tuple[tuple[str, str], dict[str, str]]: QTL group and record dictionary.
         """
         assert (
             record["study"] == "GTEx_V8"
@@ -80,9 +82,15 @@ class ParseData(beam.DoFn):
                             continue
                         if i == 5:
                             break
+                        data = dict(zip(FIELDS, line.strip().split("\t"), strict=True))
+                        chromosome = data["chromosome"]
+                        # del data["chromosome"]
                         yield (
-                            record["qtl_group"],
-                            dict(zip(FIELDS, line.strip().split("\t"), strict=True)),
+                            (
+                                record["qtl_group"],
+                                chromosome,
+                            ),
+                            data,
                         )
 
 
@@ -95,9 +103,9 @@ class WriteParquet(beam.DoFn):
         Args:
             element (tuple[Any, Any]): key and grouped values.
         """
-        qtl_group, records = element
+        (qtl_group, chromosome), records = element
         records | WriteToParquet(
-            file_path_prefix=f"output_test_{qtl_group}",
+            file_path_prefix=f"output_test_{qtl_group}_{chromosome}",
             file_name_suffix=".parquet",
             schema=PYARROW_SCHEMA,
         )
