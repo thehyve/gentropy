@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 import apache_beam as beam
 import pandas as pd
+import pyarrow
 from apache_beam.options.pipeline_options import PipelineOptions
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
@@ -22,6 +23,31 @@ def get_input_files() -> List[Dict[str, Any]]:
     """
     df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
     return df.to_dict(orient="records")
+
+
+FIELDS = [
+    "variant",
+    "r2",
+    "pvalue",
+    "molecular_trait_object_id",
+    "molecular_trait_id",
+    "maf",
+    "gene_id",
+    "median_tpm",
+    "beta",
+    "se",
+    "an",
+    "ac",
+    "chromosome",
+    "position",
+    "ref",
+    "alt",
+    "type",
+    "rsid",
+]
+PYARROW_SCHEMA = pyarrow.schema(
+    [(field_name, pyarrow.string()) for field_name in FIELDS]
+)
 
 
 class ProcessRecord(beam.DoFn):
