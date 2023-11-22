@@ -40,7 +40,8 @@ class ProcessRecord(beam.DoFn):
         assert (
             record["study"] == "GTEx_V8"
         ), "Only GTEx_V8 studies are currently supported."
-        df = pd.read_table(record["ftp_path"])
+        http_path = record["ftp_path"].replace("ftp://", "http://")
+        df = pd.read_table(http_path)
         # Output into Parquet, partitioning by chromosome.
         output_filename = (
             f"{EQTL_CATALOGUE_OUPUT_BASE}/"
