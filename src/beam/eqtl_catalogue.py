@@ -49,21 +49,21 @@ def get_input_files() -> List[Dict[str, Any]]:
 
 
 class ParseData(beam.DoFn):
-    """Process one input file and yield parsed rows."""
+    """Parse data."""
 
     FIELDS = FIELDS
 
     def process(
         self,
         record: Dict[str, Any],
-    ) -> Iterator[tuple[tuple[str, str], dict[str, str]]]:
-        """A non-blocking line-by-line iterator from a remote source.
+    ) -> Iterator[tuple[tuple[str, str], List[Any]]]:
+        """Process one input file and yield per-chromosome blocks of records.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
 
         Yields:
-            tuple[tuple[str, str], dict[str, str]]: QTL group and record dictionary.
+            tuple[tuple[str, str], List[Any]]: QTL group and record dictionary.
         """
         import gzip
         import io
@@ -79,28 +79,42 @@ class ParseData(beam.DoFn):
                 # See: https://stackoverflow.com/a/58407810.
                 typed_stream = typing.cast(typing.IO[bytes], uncompressed_stream)
                 with io.TextIOWrapper(typed_stream) as text_stream:
+                    current_chromosome = None
+                    current_data_block: List[Any] = []
+                    observed_chromosomes = set()
                     for i, line in enumerate(text_stream):
                         if i == 0:
                             # Skip header.
                             continue
-                        if i == 1000000:
+                        if i == 100000:
                             break
                         data = dict(
                             zip(self.FIELDS, line.strip().split("\t"), strict=True)
                         )
+
+                        # Perform actions depending on the chromosome.
                         chromosome = data["chromosome"]
-                        # del data["chromosome"]
-                        yield (
-                            (
-                                record["qtl_group"],
-                                chromosome,
-                            ),
-                            data,
-                        )
+                        if current_chromosome is None:
+                            # Initialise for the first record.
+                            current_chromosome = chromosome
+                        if chromosome != current_chromosome:
+                            # Yield the block and start a new one.
+                            yield (
+                                (record["qtl_group"], current_chromosome),
+                                current_data_block,
+                            )
+                            current_data_block = []
+                            observed_chromosomes.add(current_chromosome)
+                            assert (
+                                chromosome not in observed_chromosomes
+                            ), f"Chromosome {chromosome} appears twice in data"
+                            current_chromosome = chromosome
+                        # Expand existing block.
+                        current_data_block.append(data)
 
 
 class WriteData(beam.DoFn):
-    """Write a record to Parquet format."""
+    """Write a block of records to Parquet format."""
 
     EQTL_CATALOGUE_OUPUT_BASE = EQTL_CATALOGUE_OUPUT_BASE
     PYARROW_SCHEMA = PYARROW_SCHEMA
@@ -137,7 +151,6 @@ def run_pipeline() -> None:
             pipeline
             | "List input files" >> beam.Create(get_input_files())
             | "Parse data" >> beam.ParDo(ParseData())
-            | "Aggregate data" >> beam.GroupByKey()
             | "Write to Parquet" >> beam.ParDo(WriteData())
         )
 
