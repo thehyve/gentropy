@@ -62,6 +62,9 @@ class ParseData(beam.DoFn):
         delay_jitter = 3.0
         delay_give_up = 3600.0
 
+        # Value obtained by trial and error experimentation.
+        # Slower values bring too much delay into the computation cycle.
+        # Larger values cause slower buffer turnaround & slicing when serving data.
         block_size = 2 * 1024 * 1024
 
         def __init__(self, uri: str):
@@ -124,7 +127,6 @@ class ParseData(beam.DoFn):
                         self.position += self.block_size
                         break
                     except Exception as e:
-                        print("PROBLEM")
                         total_delay += delay
                         if total_delay > self.delay_give_up:
                             raise Exception(
@@ -172,18 +174,16 @@ class ParseData(beam.DoFn):
                     current_chromosome = None
                     current_data_block: List[Any] = []
                     observed_chromosomes = set()
-                    for i, line in enumerate(text_stream):
+                    chromosome_index = self.FIELDS.index("chromosome")
+                    for i, row in enumerate(text_stream):
                         if i == 0:
                             # Skip header.
                             continue
+                        data = row.split("\t")
                         if i == 100000:
                             break
-                        data = dict(
-                            zip(self.FIELDS, line.strip().split("\t"), strict=True)
-                        )
-
                         # Perform actions depending on the chromosome.
-                        chromosome = data["chromosome"]
+                        chromosome = data[chromosome_index]
                         if current_chromosome is None:
                             # Initialise for the first record.
                             current_chromosome = chromosome
@@ -214,6 +214,7 @@ class WriteData(beam.DoFn):
 
     EQTL_CATALOGUE_OUPUT_BASE = EQTL_CATALOGUE_OUPUT_BASE
     PYARROW_SCHEMA = PYARROW_SCHEMA
+    FIELDS = FIELDS
 
     def process(self, element: tuple[Any, Any]) -> None:
         """Write a Parquet file for a given input file.
@@ -221,7 +222,7 @@ class WriteData(beam.DoFn):
         Args:
             element (tuple[Any, Any]): key and grouped values.
         """
-        from apache_beam.io import WriteToParquet
+        import pandas as pd
 
         (qtl_group, chromosome), records = element
         output_filename = (
@@ -231,13 +232,9 @@ class WriteData(beam.DoFn):
             "projectId=GTEx_V8/"
             f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
             f"chromosome={chromosome}/"  # Example: 13.
-            "part"
+            "part.parquet"
         )
-        records | WriteToParquet(
-            file_path_prefix=output_filename,
-            file_name_suffix=".parquet",
-            schema=self.PYARROW_SCHEMA,
-        )
+        pd.DataFrame(records, columns=self.FIELDS).to_parquet(output_filename)
 
 
 def run_pipeline() -> None:
@@ -245,7 +242,7 @@ def run_pipeline() -> None:
     with beam.Pipeline(options=PipelineOptions()) as pipeline:
         (
             pipeline
-            | "List input files" >> beam.Create(get_input_files())
+            | "List input files" >> beam.Create(get_input_files()[:1])
             | "Parse data" >> beam.ParDo(ParseData())
             | "Write to Parquet" >> beam.ParDo(WriteData())
         )
