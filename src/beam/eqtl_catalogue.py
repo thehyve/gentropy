@@ -53,6 +53,84 @@ class ParseData(beam.DoFn):
 
     FIELDS = FIELDS
 
+    class resilient_urlopen:
+        """A resilient wrapper around urllib.request.urlopen."""
+
+        delay_initial = 1.0
+        delay_increase_factor = 1.5
+        delay_max = 120.0
+        delay_jitter = 3.0
+        delay_give_up = 3600.0
+
+        def __init__(self, uri: str):
+            """Initialise the class.
+
+            Args:
+                uri (str): The URI to read the data from.
+            """
+            import urllib.request
+
+            self.uri = uri
+            self.content_length = urllib.request.urlopen(uri).headers.get(
+                "Content-Length"
+            )
+            self.position = 0
+
+        def __enter__(self) -> "ParseData.resilient_urlopen":
+            """Stream reading entry point.
+
+            Returns:
+                ParseData.resilient_urlopen: An instance of the class
+            """
+            return self
+
+        def __exit__(self, *args: Any, **kwargs: Any) -> None:
+            """Stream reading exit point (empty).
+
+            Args:
+                *args (Any): ignored.
+                **kwargs (Any): ignored.
+            """
+            pass
+
+        def read(self, size: int) -> bytes:
+            """Stream reading method.
+
+            Args:
+                size(int): How many bytes to read.
+
+            Returns:
+                bytes: A block of data from the requested position and length.
+
+            Raises:
+                Exception: If a block could not be read from the URI exceeding the maximum delay time.
+            """
+            import random
+            import time
+            import urllib.request
+
+            byte_range = f"bytes={self.position}-{self.position + size - 1}"
+            request = urllib.request.Request(self.uri, headers={"Range": byte_range})
+            delay = self.delay_initial
+            total_delay = 0.0
+            while True:
+                try:
+                    data = urllib.request.urlopen(request).read()
+                    break
+                except Exception as e:
+                    total_delay += delay
+                    if total_delay > self.delay_give_up:
+                        raise Exception(
+                            f"Could not fetch URI {self.uri} at position {self.position}, length {size} after {total_delay} seconds"
+                        ) from e
+                    time.sleep(delay)
+                    delay = (
+                        min(delay * self.delay_increase_factor, self.delay_max)
+                        + self.delay_jitter * random.random()
+                    )
+            self.position += size
+            return data
+
     def process(
         self,
         record: Dict[str, Any],
@@ -86,8 +164,8 @@ class ParseData(beam.DoFn):
                         if i == 0:
                             # Skip header.
                             continue
-                        # if i == 1000000:
-                        #     break
+                        if i == 1000:
+                            break
                         data = dict(
                             zip(self.FIELDS, line.strip().split("\t"), strict=True)
                         )
