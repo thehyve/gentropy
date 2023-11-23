@@ -180,7 +180,7 @@ class ParseData(beam.DoFn):
                             # Skip header.
                             continue
                         data = row.split("\t")
-                        if i == 100000:
+                        if i == 1000000:
                             break
                         # Perform actions depending on the chromosome.
                         chromosome = data[chromosome_index]
@@ -242,7 +242,7 @@ def run_pipeline() -> None:
     with beam.Pipeline(options=PipelineOptions()) as pipeline:
         (
             pipeline
-            | "List input files" >> beam.Create(get_input_files()[:1])
+            | "List input files" >> beam.Create(get_input_files())
             | "Parse data" >> beam.ParDo(ParseData())
             | "Write to Parquet" >> beam.ParDo(WriteData())
         )
