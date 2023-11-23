@@ -62,18 +62,16 @@ class ParseData(beam.DoFn):
         delay_jitter = 3.0
         delay_give_up = 3600.0
 
+        block_size = 2 * 1024 * 1024
+
         def __init__(self, uri: str):
             """Initialise the class.
 
             Args:
                 uri (str): The URI to read the data from.
             """
-            import urllib.request
-
             self.uri = uri
-            self.content_length = urllib.request.urlopen(uri).headers.get(
-                "Content-Length"
-            )
+            self.buffer = b""
             self.position = 0
 
         def __enter__(self) -> "ParseData.resilient_urlopen":
@@ -109,26 +107,38 @@ class ParseData(beam.DoFn):
             import time
             import urllib.request
 
-            byte_range = f"bytes={self.position}-{self.position + size - 1}"
-            request = urllib.request.Request(self.uri, headers={"Range": byte_range})
-            delay = self.delay_initial
-            total_delay = 0.0
-            while True:
-                try:
-                    data = urllib.request.urlopen(request).read()
-                    break
-                except Exception as e:
-                    total_delay += delay
-                    if total_delay > self.delay_give_up:
-                        raise Exception(
-                            f"Could not fetch URI {self.uri} at position {self.position}, length {size} after {total_delay} seconds"
-                        ) from e
-                    time.sleep(delay)
-                    delay = (
-                        min(delay * self.delay_increase_factor, self.delay_max)
-                        + self.delay_jitter * random.random()
-                    )
-            self.position += size
+            # If the buffer isn't enough to serve next block, we need to extend it first.
+            if size > len(self.buffer):
+                byte_range = (
+                    f"bytes={self.position}-{self.position + self.block_size - 1}"
+                )
+                request = urllib.request.Request(
+                    self.uri, headers={"Range": byte_range}
+                )
+                delay = self.delay_initial
+                total_delay = 0.0
+                while True:
+                    try:
+                        block = urllib.request.urlopen(request).read()
+                        self.buffer += block
+                        self.position += self.block_size
+                        break
+                    except Exception as e:
+                        print("PROBLEM")
+                        total_delay += delay
+                        if total_delay > self.delay_give_up:
+                            raise Exception(
+                                f"Could not fetch URI {self.uri} at position {self.position}, length {size} after {total_delay} seconds"
+                            ) from e
+                        time.sleep(delay)
+                        delay = (
+                            min(delay * self.delay_increase_factor, self.delay_max)
+                            + self.delay_jitter * random.random()
+                        )
+
+            # Return next block from the buffer.
+            data = self.buffer[:size]
+            self.buffer = self.buffer[size:]
             return data
 
     def process(
