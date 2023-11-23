@@ -146,17 +146,19 @@ class ParseData(beam.DoFn):
         import gzip
         import io
         import typing
-        import urllib.request
 
         assert (
             record["study"] == "GTEx_V8"
         ), "Only GTEx_V8 studies are currently supported."
         http_path = record["ftp_path"].replace("ftp://", "http://")
-        with urllib.request.urlopen(http_path) as compressed_stream:
-            with gzip.GzipFile(fileobj=compressed_stream) as uncompressed_stream:
-                # See: https://stackoverflow.com/a/58407810.
-                typed_stream = typing.cast(typing.IO[bytes], uncompressed_stream)
-                with io.TextIOWrapper(typed_stream) as text_stream:
+        with self.resilient_urlopen(http_path) as compressed_stream:
+            # See: https://stackoverflow.com/a/58407810.
+            compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
+            with gzip.GzipFile(fileobj=compressed_stream_typed) as uncompressed_stream:
+                uncompressed_stream_typed = typing.cast(
+                    typing.IO[bytes], uncompressed_stream
+                )
+                with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
                     current_chromosome = None
                     current_data_block: List[Any] = []
                     observed_chromosomes = set()
@@ -164,7 +166,7 @@ class ParseData(beam.DoFn):
                         if i == 0:
                             # Skip header.
                             continue
-                        if i == 1000:
+                        if i == 100000:
                             break
                         data = dict(
                             zip(self.FIELDS, line.strip().split("\t"), strict=True)
