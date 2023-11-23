@@ -56,14 +56,14 @@ class ParseData(beam.DoFn):
     def process(
         self,
         record: Dict[str, Any],
-    ) -> Iterator[tuple[tuple[str, str], List[Any]]]:
+    ) -> Iterator[tuple[tuple[Any, str | None], list[Any]]]:
         """Process one input file and yield per-chromosome blocks of records.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
 
         Yields:
-            tuple[tuple[str, str], List[Any]]: QTL group and record dictionary.
+            tuple[tuple[Any, str | None], list[Any]]: QTL group and record dictionary.
         """
         import gzip
         import io
@@ -86,8 +86,8 @@ class ParseData(beam.DoFn):
                         if i == 0:
                             # Skip header.
                             continue
-                        if i == 100000:
-                            break
+                        # if i == 1000000:
+                        #     break
                         data = dict(
                             zip(self.FIELDS, line.strip().split("\t"), strict=True)
                         )
@@ -111,6 +111,12 @@ class ParseData(beam.DoFn):
                             current_chromosome = chromosome
                         # Expand existing block.
                         current_data_block.append(data)
+                    # Yield last block.
+                    if current_data_block:
+                        yield (
+                            (record["qtl_group"], current_chromosome),
+                            current_data_block,
+                        )
 
 
 class WriteData(beam.DoFn):
