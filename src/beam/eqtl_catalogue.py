@@ -53,6 +53,9 @@ class ParseData(beam.DoFn):
 
     FIELDS = FIELDS
 
+    # How many lines of raw data to fetch and parse at once.
+    fetch_chunk_size = 50_000
+
     # How many records, on average, to try and keep in each Parquet partition.
     emit_block_size = 500_000
     # How much of a look-ahead buffer to keep (times the `emit_block_size`)
@@ -157,6 +160,42 @@ class ParseData(beam.DoFn):
             data = self.buffer[:size]
             self.buffer = self.buffer[size:]
             return data
+
+    def _fetch_data_in_blocks(self, uri: str) -> Iterator[str]:
+        """Fetches data in complete-line blocks of approximate size self.fetch_block_size.
+
+        Args:
+            uri (str): URI to fetch the data from.
+
+        Yields:
+            str: complete-line blocks of raw data.
+        """
+        import gzip
+        import io
+        import typing
+
+        with self.resilient_urlopen(uri) as compressed_stream:
+            # See: https://stackoverflow.com/a/58407810.
+            compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
+            with gzip.GzipFile(fileobj=compressed_stream_typed) as uncompressed_stream:
+                uncompressed_stream_typed = typing.cast(
+                    typing.IO[bytes], uncompressed_stream
+                )
+                with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
+                    # Skip header.
+                    text_stream.readline()
+                    # Initialise buffer.
+                    buffer = ""
+                    while True:
+                        # Read more data from the URI source.
+                        buffer += text_stream.read(self.chunk_size)
+                        # If we don't have any data, this means we reached the end of the stream.
+                        if not buffer:
+                            break
+                        # Find the rightmost newline so that we always yield blocks of complete records.
+                        rightmost_newline_split = buffer.rfind("\n") + 1
+                        yield buffer[:rightmost_newline_split]
+                        buffer = buffer[rightmost_newline_split:]
 
     def _split_final_data(
         self, qtl_group: str, chromosome: str, block_index: int, data: List[str]
