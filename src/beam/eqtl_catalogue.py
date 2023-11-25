@@ -73,9 +73,15 @@ class ParseData(beam.DoFn):
             Args:
                 uri (str): The URI to read the data from.
             """
+            import urllib.request
+
             self.uri = uri
             self.buffer = b""
             self.position = 0
+            self.content_length = int(
+                urllib.request.urlopen(uri).getheader("Content-Length")
+            )
+            assert self.content_length > 0
 
         def __enter__(self) -> "ParseData.resilient_urlopen":
             """Stream reading entry point.
@@ -111,7 +117,7 @@ class ParseData(beam.DoFn):
             import urllib.request
 
             # If the buffer isn't enough to serve next block, we need to extend it first.
-            if size > len(self.buffer):
+            if (size > len(self.buffer)) and (self.position != self.content_length):
                 byte_range = (
                     f"bytes={self.position}-{self.position + self.block_size - 1}"
                 )
@@ -124,7 +130,7 @@ class ParseData(beam.DoFn):
                     try:
                         block = urllib.request.urlopen(request).read()
                         self.buffer += block
-                        self.position += self.block_size
+                        self.position += len(block)
                         break
                     except Exception as e:
                         total_delay += delay
