@@ -53,6 +53,15 @@ class ParseData(beam.DoFn):
 
     FIELDS = FIELDS
 
+    # How many records, on average, to try and keep in each Parquet partition.
+    emit_block_size = 500_000
+    # How much of a look-ahead buffer to keep (times the `emit_block_size`)
+    # Increasing this value increases memory footprint but decreases spread in the final parquet partitions.
+    # 4.0 value means that an average error for the final partitions is ~5% and the maximum possible error is ~10%.
+    emit_look_ahead_factor = 4.0
+    # Denotes when the look-ahead buffer is long enough to emit a block from it.
+    emit_ready_buffer = emit_block_size * (emit_look_ahead_factor + 1)
+
     class resilient_urlopen:
         """A resilient wrapper around urllib.request.urlopen."""
 
@@ -149,17 +158,44 @@ class ParseData(beam.DoFn):
             self.buffer = self.buffer[size:]
             return data
 
+    def _split_final_data(
+        self, qtl_group: str, chromosome: str, block_index: int, data: List[str]
+    ) -> Iterator[tuple[str, str, int, List[str]]]:
+        """Process the final chunk of the data and split into partitions as close to self.emit_block_size as possible.
+
+        Args:
+            qtl_group (str): QTL group field used for study ID.
+            chromosome (str): Chromosome identifier.
+            block_index (int): Starting number of the block to emit.
+            data (List[str]): Remaining chunk data to split.
+
+        Yields:
+            tuple[str, str, int, List[str]]: Tuple of values to generate the final Parquet file.
+        """
+        import math
+
+        number_of_blocks = max(round(len(data) / self.emit_block_size), 1)
+        records_per_block = math.ceil(len(data) / number_of_blocks)
+        for index in range(0, len(data), records_per_block):
+            yield (
+                qtl_group,
+                chromosome,
+                block_index,
+                data[index : index + records_per_block],
+            )
+            block_index += 1
+
     def process(
         self,
         record: Dict[str, Any],
-    ) -> Iterator[tuple[tuple[Any, str | None], list[Any]]]:
+    ) -> Iterator[tuple[str, str, int, List[str]]]:
         """Process one input file and yield per-chromosome blocks of records.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
 
         Yields:
-            tuple[tuple[Any, str | None], list[Any]]: QTL group and record dictionary.
+            tuple[str, str, int, List[str]]: Attribute and data list.
         """
         import gzip
         import io
@@ -177,8 +213,9 @@ class ParseData(beam.DoFn):
                     typing.IO[bytes], uncompressed_stream
                 )
                 with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
-                    current_chromosome = None
+                    current_chromosome = ""
                     current_data_block: List[Any] = []
+                    current_block_index = 0
                     observed_chromosomes = set()
                     chromosome_index = self.FIELDS.index("chromosome")
                     for i, row in enumerate(text_stream):
@@ -186,20 +223,34 @@ class ParseData(beam.DoFn):
                             # Skip header.
                             continue
                         data = row.split("\t")
-                        if i == 1000000:
-                            break
                         # Perform actions depending on the chromosome.
                         chromosome = data[chromosome_index]
-                        if current_chromosome is None:
+                        if not current_chromosome:
                             # Initialise for the first record.
                             current_chromosome = chromosome
-                        if chromosome != current_chromosome:
-                            # Yield the block and start a new one.
+                        if len(current_data_block) >= self.emit_ready_buffer:
+                            data_block = current_data_block[: self.emit_block_size]
                             yield (
-                                (record["qtl_group"], current_chromosome),
-                                current_data_block,
+                                record["qtl_group"],
+                                current_chromosome,
+                                current_block_index,
+                                data_block,
                             )
+                            current_data_block = current_data_block[
+                                self.emit_block_size :
+                            ]
+                            current_block_index += 1
+                        if chromosome != current_chromosome:
+                            # Yield the block(s) and reset everything.
+                            for block in self._split_final_data(
+                                record["qtl_group"],
+                                current_chromosome,
+                                current_block_index,
+                                current_data_block,
+                            ):
+                                yield block
                             current_data_block = []
+                            current_block_index = 0
                             observed_chromosomes.add(current_chromosome)
                             assert (
                                 chromosome not in observed_chromosomes
@@ -207,12 +258,15 @@ class ParseData(beam.DoFn):
                             current_chromosome = chromosome
                         # Expand existing block.
                         current_data_block.append(data)
-                    # Yield last block.
+                    # Yield any remaining block(s).
                     if current_data_block:
-                        yield (
-                            (record["qtl_group"], current_chromosome),
+                        for block in self._split_final_data(
+                            record["qtl_group"],
+                            current_chromosome,
+                            current_block_index,
                             current_data_block,
-                        )
+                        ):
+                            yield block
 
 
 class WriteData(beam.DoFn):
@@ -222,15 +276,15 @@ class WriteData(beam.DoFn):
     PYARROW_SCHEMA = PYARROW_SCHEMA
     FIELDS = FIELDS
 
-    def process(self, element: tuple[Any, Any]) -> None:
+    def process(self, element: tuple[str, str, int, List[str]]) -> None:
         """Write a Parquet file for a given input file.
 
         Args:
-            element (tuple[Any, Any]): key and grouped values.
+            element (tuple[str, str, int, List[str]]): key and grouped values.
         """
         import pandas as pd
 
-        (qtl_group, chromosome), records = element
+        qtl_group, chromosome, chunk_number, records = element
         output_filename = (
             f"{self.EQTL_CATALOGUE_OUPUT_BASE}/"
             "analysisType=eQTL/"
@@ -238,9 +292,11 @@ class WriteData(beam.DoFn):
             "projectId=GTEx_V8/"
             f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
             f"chromosome={chromosome}/"  # Example: 13.
-            "part.parquet"
+            f"part-{chunk_number:05}.snappy.parquet"
         )
-        pd.DataFrame(records, columns=self.FIELDS).to_parquet(output_filename)
+        pd.DataFrame(records, columns=self.FIELDS).to_parquet(
+            output_filename, compression="snappy"
+        )
 
 
 def run_pipeline() -> None:
