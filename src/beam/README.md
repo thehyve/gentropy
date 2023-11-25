@@ -14,5 +14,6 @@ To run a pipeline:
 gcloud dataflow jobs run eqtl-test \
   --gcs-location gs://genetics_etl_python_playground/beam/eqtl_catalogue \
   --region europe-west1 \
-  --worker-machine-type n2-highmem-4
+  --worker-machine-type n2-highmem-4 \
+  --num-workers 13
 ```
