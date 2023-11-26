@@ -253,7 +253,7 @@ class ParseData(beam.DoFn):
         for data_block in self._fetch_data_in_blocks(http_path):
             # Parse data block.
             data_io = io.StringIO(data_block)
-            df_block = pd.DataFrame(data_io, columns=self.FIELDS)
+            df_block = pd.read_table(data_io, names=self.FIELDS, header=None)
 
             # Split data block by chromosome.
             df_block_by_chromosome = [
