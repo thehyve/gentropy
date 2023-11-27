@@ -270,7 +270,7 @@ class ParseData(beam.DoFn):
             # we append the data from the block to the current chromosome block.
             if first_chromosome_in_block == current_chromosome:
                 current_data_block = pd.concat(
-                    current_data_block, df_block_by_chromosome[0][1]
+                    [current_data_block, df_block_by_chromosome[0][1]]
                 )
                 df_block_by_chromosome = df_block_by_chromosome[1:]
 
