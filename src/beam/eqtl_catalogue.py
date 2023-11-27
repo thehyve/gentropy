@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Apache Beam pipeline to preprocess and partition the eQTL Catalogue."""
+"""Cloud Batch pipeline to preprocess and partition the eQTL Catalogue."""
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from multiprocessing import Process, Queue
 from typing import Any, Dict, Iterator
 
@@ -247,23 +249,28 @@ class ParseData:
                             q_out.put(None)
                             break
                         q_out.put(text_block)
-                        print(f"p1 emitted > {len(text_block)} uncompressed bytes")
+                        sys.stderr.write(
+                            f"p1 emitted > {len(text_block)} uncompressed bytes\n"
+                        )
 
     def _p2_emit_complete_line_blocks(self, q_in: Queue, q_out: Queue) -> None:
         # Initialise buffer.
         buffer = ""
         while True:
             text_block = q_in.get()
-            buffer += text_block
-            # If we don't have any data, this means we reached the end of the stream.
-            if not buffer:
+            if text_block is None:
                 # End of stream.
+                if buffer:
+                    q_out.put(buffer)
                 q_out.put(None)
                 break
+            buffer += text_block
             # Find the rightmost newline so that we always emit blocks of complete records.
             rightmost_newline_split = buffer.rfind("\n") + 1
             q_out.put(buffer[:rightmost_newline_split])
-            print(f"p2 emitted > {rightmost_newline_split} uncompressed bytes")
+            sys.stderr.write(
+                f"p2 emitted > {rightmost_newline_split} uncompressed bytes\n"
+            )
             buffer = buffer[rightmost_newline_split:]
 
     def _p3_parse_data(self, q_in: Queue, q_out: Queue) -> None:
@@ -273,7 +280,7 @@ class ParseData:
 
         while True:
             lines_block = q_in.get()
-            if not lines_block:
+            if lines_block is None:
                 # End of stream.
                 q_out.put(None)
                 break
@@ -281,7 +288,7 @@ class ParseData:
             data_io = io.StringIO(lines_block)
             df_block = pd.read_table(data_io, names=FIELDS, header=None)
             q_out.put(df_block)
-            print(f"p3 emitted >> {len(df_block)} Pandas records")
+            sys.stderr.write(f"p3 emitted >> {len(df_block)} Pandas records\n")
 
     def _p4_split_by_chromosome(self, q_in: Queue, q_out: Queue) -> None:
         while True:
@@ -296,7 +303,7 @@ class ParseData:
                 for key, group in df_block.groupby("chromosome", sort=False)
             ]
             q_out.put(df_block_by_chromosome)
-            print(f"p4 emitted >> {len(df_block_by_chromosome)} blocks")
+            sys.stderr.write(f"p4 emitted >> {len(df_block_by_chromosome)} blocks\n")
 
     def _p5_emit_final_blocks(self, q_in: Queue, q_out: Queue, qtl_group: str) -> None:
         # Initialise counters.
@@ -307,7 +314,7 @@ class ParseData:
         # Process.
         while True:
             df_block_by_chromosome = q_in.get()
-            if not df_block_by_chromosome:
+            if df_block_by_chromosome is None:
                 # End of stream.
                 break
 
@@ -362,6 +369,9 @@ class ParseData:
             ):
                 q_out.put(block)
 
+        # Indicate to the next step that the processing is done.
+        q_out.put(None)
+
     def _p6_write_parquet(self, q_in: Queue) -> None:
         """Write a Parquet file for a given input file.
 
@@ -370,7 +380,7 @@ class ParseData:
         """
         while True:
             element = q_in.get()
-            if not element:
+            if element is None:
                 # End of stream.
                 break
             qtl_group, chromosome, chunk_number, df = element
@@ -384,7 +394,7 @@ class ParseData:
                 f"part-{chunk_number:05}.snappy.parquet"
             )
             df.to_parquet(output_filename, compression="snappy")
-            print(f"OUTPUT > {output_filename}")
+            sys.stderr.write(f"OUTPUT > {output_filename}\n")
 
     def process(
         self,
@@ -428,12 +438,56 @@ def process(batch_index: int) -> None:
     ParseData().process(record)
 
 
+def generate_job_config(number_of_tasks: int, max_parallelism: int = 50) -> str:
+    config = {
+        "taskGroups": [
+            {
+                "taskSpec": {
+                    "runnables": [
+                        {
+                            "script": {
+                                "text": "bash /mnt/share/eqtl_catalogue.sh",
+                            }
+                        }
+                    ],
+                    "computeResource": {"cpuMilli": 4000, "memoryMib": 6000},
+                    "volumes": [
+                        {
+                            "gcs": {
+                                "remotePath": "genetics_etl_python_playground/batch/eqtl_catalogue"
+                            },
+                            "mountPath": "/mnt/share",
+                        }
+                    ],
+                    "maxRetryCount": 1,
+                    "maxRunDuration": "3600s",
+                },
+                "taskCount": number_of_tasks,
+                "parallelism": min(number_of_tasks, max_parallelism),
+            }
+        ],
+        "allocationPolicy": {
+            "instances": [
+                {
+                    "policy": {
+                        "machineType": "n2d-standard-4",
+                        "provisioningModel": "SPOT",
+                    }
+                }
+            ]
+        },
+        "logsPolicy": {"destination": "CLOUD_LOGGING"},
+    }
+    return json.dumps(config, indent=4)
+
+
 if __name__ == "__main__":
     # Are we running on Google Cloud?
-    batch_index = os.environ.get("BATCH_TASK_INDEX")
-
-    if batch_index:
+    args = sys.argv[1:]
+    if args:
         # We are running inside Google Cloud, let's process one file.
-        process(int(batch_index))
+        process(int(args[0]))
     else:
-        raise NotImplementedError
+        # We are running locally. Need to generate job config.
+        number_of_tasks = len(pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH))
+        print(generate_job_config(number_of_tasks))
