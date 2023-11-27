@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from multiprocessing import Queue
 from typing import Any, Dict, Iterator, List
 
 import apache_beam as beam
@@ -53,8 +54,8 @@ class ParseData(beam.DoFn):
 
     FIELDS = FIELDS
 
-    # How many lines of raw data to fetch and parse at once.
-    fetch_chunk_size = 5_000_000
+    # How many bytes of raw (uncompressed) data to fetch and parse at once.
+    fetch_chunk_size = 100_000_000
 
     # How many records, on average, to try and keep in each Parquet partition.
     emit_block_size = 500_000
@@ -207,15 +208,7 @@ class ParseData(beam.DoFn):
             self.buffer = self.buffer[size:]
             return data
 
-    def _fetch_data_in_blocks(self, uri: str) -> Iterator[str]:
-        """Fetches data in complete-line blocks of approximate size self.fetch_block_size.
-
-        Args:
-            uri (str): URI to fetch the data from.
-
-        Yields:
-            str: complete-line blocks of raw data.
-        """
+    def _p1_fetch_data_from_uri(self, uri: str, q_out: Queue) -> None:
         import gzip
         import io
         import typing
@@ -230,18 +223,64 @@ class ParseData(beam.DoFn):
                 with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
                     # Skip header.
                     text_stream.readline()
-                    # Initialise buffer.
-                    buffer = ""
                     while True:
                         # Read more data from the URI source.
-                        buffer += text_stream.read(self.fetch_chunk_size)
-                        # If we don't have any data, this means we reached the end of the stream.
-                        if not buffer:
+                        text_block = text_stream.read(self.fetch_chunk_size)
+                        if not text_block:
+                            # End of stream.
+                            q_out.put(None)
                             break
-                        # Find the rightmost newline so that we always yield blocks of complete records.
-                        rightmost_newline_split = buffer.rfind("\n") + 1
-                        yield buffer[:rightmost_newline_split]
-                        buffer = buffer[rightmost_newline_split:]
+                        q_out.put(text_block)
+                        print("p1 emitted")
+
+    def _p2_emit_complete_line_blocks(self, q_in: Queue, q_out: Queue) -> None:
+        # Initialise buffer.
+        buffer = ""
+        while True:
+            text_block = q_in.get()
+            buffer += text_block
+            # If we don't have any data, this means we reached the end of the stream.
+            if not buffer:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Find the rightmost newline so that we always emit blocks of complete records.
+            rightmost_newline_split = buffer.rfind("\n") + 1
+            q_out.put(buffer[:rightmost_newline_split])
+            print("p2 emitted")
+            buffer = buffer[rightmost_newline_split:]
+
+    def _p3_parse_data(self, q_in: Queue, q_out: Queue) -> None:
+        import io
+
+        import pandas as pd
+
+        while True:
+            lines_block = q_in.get()
+            if not lines_block:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Parse data block.
+            data_io = io.StringIO(lines_block)
+            df_block = pd.read_table(data_io, names=self.FIELDS, header=None)
+            q_out.put(df_block)
+            print("p3 emitted")
+
+    def _p4_split_by_chromosome(self, q_in: Queue, q_out: Queue) -> None:
+        while True:
+            df_block = q_in.get()
+            if df_block is None:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Split data block by chromosome.
+            df_block_by_chromosome = [
+                (key, group)
+                for key, group in df_block.groupby("chromosome", sort=False)
+            ]
+            q_out.put(df_block_by_chromosome)
+            print("p4 emitted")
 
     def _split_final_data(
         self, qtl_group: str, chromosome: str, block_index: int, df: pd.DataFrame
@@ -282,30 +321,38 @@ class ParseData(beam.DoFn):
         Yields:
             tuple[str, str, int, pd.DataFrame]: Attribute and data list.
         """
-        import io
+        from multiprocessing import Process, Queue
 
         import pandas as pd
 
         assert (
             record["study"] == "GTEx_V8"
         ), "Only GTEx_V8 studies are currently supported."
-        # http_path = record["ftp_path"].replace("ftp://", "http://")
         qtl_group = record["qtl_group"]
 
+        # Set up concurrent execution.
+        q1, q2, q3, q4 = [Queue() for _ in range(4)]
+        processes = [
+            Process(target=self._p1_fetch_data_from_uri, args=(record["ftp_path"], q1)),
+            Process(target=self._p2_emit_complete_line_blocks, args=(q1, q2)),
+            Process(target=self._p3_parse_data, args=(q2, q3)),
+            Process(target=self._p4_split_by_chromosome, args=(q3, q4)),
+        ]
+        for p in processes:
+            p.start()
+
+        # Initialise counters.
         current_chromosome = ""
         current_block_index = 0
         current_data_block = pd.DataFrame(columns=self.FIELDS)
 
-        for data_block in self._fetch_data_in_blocks(record["ftp_path"]):
-            # Parse data block.
-            data_io = io.StringIO(data_block)
-            df_block = pd.read_table(data_io, names=self.FIELDS, header=None)
+        # Process.
+        while True:
+            df_block_by_chromosome = q4.get()
+            if not df_block_by_chromosome:
+                # End of stream.
+                break
 
-            # Split data block by chromosome.
-            df_block_by_chromosome = [
-                (key, group)
-                for key, group in df_block.groupby("chromosome", sort=False)
-            ]
             first_chromosome_in_block = df_block_by_chromosome[0][0]
 
             # If this is the first block we ever see, initialise "current_chromosome".
@@ -354,6 +401,9 @@ class ParseData(beam.DoFn):
                 qtl_group, current_chromosome, current_block_index, current_data_block
             ):
                 yield block
+
+        # Close process pool.
+        processes[-1].join()
 
 
 class WriteData(beam.DoFn):
