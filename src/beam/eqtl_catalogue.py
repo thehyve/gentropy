@@ -1,14 +1,14 @@
+#!/usr/bin/env python
 """Apache Beam pipeline to preprocess and partition the eQTL Catalogue."""
 
 from __future__ import annotations
 
-from multiprocessing import Queue
-from typing import Any, Dict, Iterator, List
+import os
+from multiprocessing import Process, Queue
+from typing import Any, Dict, Iterator
 
-import apache_beam as beam
 import pandas as pd
 import pyarrow
-from apache_beam.options.pipeline_options import PipelineOptions
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
 EQTL_CATALOGUE_OUPUT_BASE = (
@@ -39,20 +39,151 @@ PYARROW_SCHEMA = pyarrow.schema(
 )
 
 
-def get_input_files() -> List[Dict[str, Any]]:
-    """Generate the list of input records.
+class resilient_urlopen:
+    """A resilient wrapper around urllib.request.urlopen."""
 
-    Returns:
-        List[Dict[str, Any]]: list of input file attribute dictionaries.
-    """
-    df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
-    return df.to_dict(orient="records")
+    delay_initial = 1.0
+    delay_increase_factor = 1.5
+    delay_max = 120.0
+    delay_jitter = 3.0
+    delay_give_up = 3600.0
+
+    # Value obtained by trial and error experimentation.
+    # Slower values bring too much delay into the computation cycle.
+    # Larger values cause slower buffer turnaround & slicing when serving data.
+    block_size = 20 * 1024 * 1024
+
+    def __init__(self, uri: str):
+        """Initialise the class.
+
+        Args:
+            uri (str): The URI to read the data from.
+
+        Raises:
+            NotImplementedError: If the protocol is not HTTP(s) or FTP.
+        """
+        import ftplib
+        import os.path
+        import random
+        import time
+        import urllib.parse
+        import urllib.request
+
+        self.uri = uri
+        self.buffer = b""
+        self.position = 0
+        while True:
+            try:
+                if uri.startswith("http"):
+                    self.content_length = int(
+                        urllib.request.urlopen(uri).getheader("Content-Length")
+                    )
+                elif uri.startswith("ftp"):
+                    parsed_uri = urllib.parse.urlparse(uri)
+                    self.ftp_server = parsed_uri.netloc
+                    self.ftp_path, self.ftp_filename = os.path.split(
+                        parsed_uri.path[1:]
+                    )
+                    with ftplib.FTP(self.ftp_server) as ftp:
+                        ftp.login()
+                        ftp.cwd(self.ftp_path)
+                        length = ftp.size(self.ftp_filename)
+                        assert (
+                            length is not None
+                        ), f"FTP server returned no length for {uri}."
+                        self.content_length = length
+                else:
+                    raise NotImplementedError(f"Unsupported URI schema: {uri}.")
+                break
+            except Exception:
+                time.sleep(5 + random.random())
+        assert self.content_length > 0
+
+    def __enter__(self) -> "ParseData.resilient_urlopen":
+        """Stream reading entry point.
+
+        Returns:
+            ParseData.resilient_urlopen: An instance of the class
+        """
+        return self
+
+    def __exit__(self, *args: Any, **kwargs: Any) -> None:
+        """Stream reading exit point (empty).
+
+        Args:
+            *args (Any): ignored.
+            **kwargs (Any): ignored.
+        """
+        pass
+
+    def read(self, size: int) -> bytes:
+        """Stream reading method.
+
+        Args:
+            size(int): How many bytes to read.
+
+        Returns:
+            bytes: A block of data from the requested position and length.
+
+        Raises:
+            Exception: If a block could not be read from the URI exceeding the maximum delay time.
+            NotImplementedError: If the protocol is not HTTP(s) or FTP.
+        """
+        import random
+        import time
+        import urllib.request
+
+        import ftputil
+
+        # If the buffer isn't enough to serve next block, we need to extend it first.
+        while (size > len(self.buffer)) and (self.position != self.content_length):
+            delay = self.delay_initial
+            total_delay = 0.0
+            while True:
+                try:
+                    if self.uri.startswith("http"):
+                        byte_range = f"bytes={self.position}-{self.position + self.block_size - 1}"
+                        request = urllib.request.Request(
+                            self.uri, headers={"Range": byte_range}
+                        )
+                        block = urllib.request.urlopen(request).read()
+                    elif self.uri.startswith("ftp"):
+                        with ftputil.FTPHost(
+                            self.ftp_server, "anonymous", "anonymous"
+                        ) as ftp_host:
+                            with ftp_host.open(
+                                f"{self.ftp_path}/{self.ftp_filename}",
+                                mode="rb",
+                                rest=self.position,
+                            ) as stream:
+                                block = stream.read(self.block_size)
+                    else:
+                        raise NotImplementedError(
+                            f"Unsupported URI schema: {self.uri}."
+                        )
+                    self.buffer += block
+                    self.position += len(block)
+                    break
+                except Exception as e:
+                    total_delay += delay
+                    if total_delay > self.delay_give_up:
+                        raise Exception(
+                            f"Could not fetch URI {self.uri} at position {self.position}, length {size} after {total_delay} seconds"
+                        ) from e
+                    time.sleep(delay)
+                    delay = (
+                        min(delay * self.delay_increase_factor, self.delay_max)
+                        + self.delay_jitter * random.random()
+                    )
+
+        # Return next block from the buffer.
+        data = self.buffer[:size]
+        self.buffer = self.buffer[size:]
+        return data
 
 
-class ParseData(beam.DoFn):
+class ParseData:
     """Parse data."""
-
-    FIELDS = FIELDS
 
     # How many bytes of raw (uncompressed) data to fetch and parse at once.
     fetch_chunk_size = 100_000_000
@@ -65,222 +196,6 @@ class ParseData(beam.DoFn):
     emit_look_ahead_factor = 4.0
     # Denotes when the look-ahead buffer is long enough to emit a block from it.
     emit_ready_buffer = emit_block_size * (emit_look_ahead_factor + 1)
-
-    class resilient_urlopen:
-        """A resilient wrapper around urllib.request.urlopen."""
-
-        delay_initial = 1.0
-        delay_increase_factor = 1.5
-        delay_max = 120.0
-        delay_jitter = 3.0
-        delay_give_up = 3600.0
-
-        # Value obtained by trial and error experimentation.
-        # Slower values bring too much delay into the computation cycle.
-        # Larger values cause slower buffer turnaround & slicing when serving data.
-        block_size = 20 * 1024 * 1024
-
-        def __init__(self, uri: str):
-            """Initialise the class.
-
-            Args:
-                uri (str): The URI to read the data from.
-
-            Raises:
-                NotImplementedError: If the protocol is not HTTP(s) or FTP.
-            """
-            import ftplib
-            import os.path
-            import random
-            import time
-            import urllib.parse
-            import urllib.request
-
-            self.uri = uri
-            self.buffer = b""
-            self.position = 0
-            while True:
-                try:
-                    if uri.startswith("http"):
-                        self.content_length = int(
-                            urllib.request.urlopen(uri).getheader("Content-Length")
-                        )
-                    elif uri.startswith("ftp"):
-                        parsed_uri = urllib.parse.urlparse(uri)
-                        self.ftp_server = parsed_uri.netloc
-                        self.ftp_path, self.ftp_filename = os.path.split(
-                            parsed_uri.path[1:]
-                        )
-                        with ftplib.FTP(self.ftp_server) as ftp:
-                            ftp.login()
-                            ftp.cwd(self.ftp_path)
-                            length = ftp.size(self.ftp_filename)
-                            assert (
-                                length is not None
-                            ), f"FTP server returned no length for {uri}."
-                            self.content_length = length
-                    else:
-                        raise NotImplementedError(f"Unsupported URI schema: {uri}.")
-                    break
-                except Exception:
-                    time.sleep(5 + random.random())
-            assert self.content_length > 0
-
-        def __enter__(self) -> "ParseData.resilient_urlopen":
-            """Stream reading entry point.
-
-            Returns:
-                ParseData.resilient_urlopen: An instance of the class
-            """
-            return self
-
-        def __exit__(self, *args: Any, **kwargs: Any) -> None:
-            """Stream reading exit point (empty).
-
-            Args:
-                *args (Any): ignored.
-                **kwargs (Any): ignored.
-            """
-            pass
-
-        def read(self, size: int) -> bytes:
-            """Stream reading method.
-
-            Args:
-                size(int): How many bytes to read.
-
-            Returns:
-                bytes: A block of data from the requested position and length.
-
-            Raises:
-                Exception: If a block could not be read from the URI exceeding the maximum delay time.
-                NotImplementedError: If the protocol is not HTTP(s) or FTP.
-            """
-            import random
-            import time
-            import urllib.request
-
-            import ftputil
-
-            # If the buffer isn't enough to serve next block, we need to extend it first.
-            while (size > len(self.buffer)) and (self.position != self.content_length):
-                delay = self.delay_initial
-                total_delay = 0.0
-                while True:
-                    try:
-                        if self.uri.startswith("http"):
-                            byte_range = f"bytes={self.position}-{self.position + self.block_size - 1}"
-                            request = urllib.request.Request(
-                                self.uri, headers={"Range": byte_range}
-                            )
-                            block = urllib.request.urlopen(request).read()
-                        elif self.uri.startswith("ftp"):
-                            with ftputil.FTPHost(
-                                self.ftp_server, "anonymous", "anonymous"
-                            ) as ftp_host:
-                                with ftp_host.open(
-                                    f"{self.ftp_path}/{self.ftp_filename}",
-                                    mode="rb",
-                                    rest=self.position,
-                                ) as stream:
-                                    block = stream.read(self.block_size)
-                        else:
-                            raise NotImplementedError(
-                                f"Unsupported URI schema: {self.uri}."
-                            )
-                        self.buffer += block
-                        self.position += len(block)
-                        break
-                    except Exception as e:
-                        total_delay += delay
-                        if total_delay > self.delay_give_up:
-                            raise Exception(
-                                f"Could not fetch URI {self.uri} at position {self.position}, length {size} after {total_delay} seconds"
-                            ) from e
-                        time.sleep(delay)
-                        delay = (
-                            min(delay * self.delay_increase_factor, self.delay_max)
-                            + self.delay_jitter * random.random()
-                        )
-
-            # Return next block from the buffer.
-            data = self.buffer[:size]
-            self.buffer = self.buffer[size:]
-            return data
-
-    def _p1_fetch_data_from_uri(self, uri: str, q_out: Queue) -> None:
-        import gzip
-        import io
-        import typing
-
-        with self.resilient_urlopen(uri) as compressed_stream:
-            # See: https://stackoverflow.com/a/58407810.
-            compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
-            with gzip.GzipFile(fileobj=compressed_stream_typed) as uncompressed_stream:
-                uncompressed_stream_typed = typing.cast(
-                    typing.IO[bytes], uncompressed_stream
-                )
-                with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
-                    # Skip header.
-                    text_stream.readline()
-                    while True:
-                        # Read more data from the URI source.
-                        text_block = text_stream.read(self.fetch_chunk_size)
-                        if not text_block:
-                            # End of stream.
-                            q_out.put(None)
-                            break
-                        q_out.put(text_block)
-                        print("p1 emitted")
-
-    def _p2_emit_complete_line_blocks(self, q_in: Queue, q_out: Queue) -> None:
-        # Initialise buffer.
-        buffer = ""
-        while True:
-            text_block = q_in.get()
-            buffer += text_block
-            # If we don't have any data, this means we reached the end of the stream.
-            if not buffer:
-                # End of stream.
-                q_out.put(None)
-                break
-            # Find the rightmost newline so that we always emit blocks of complete records.
-            rightmost_newline_split = buffer.rfind("\n") + 1
-            q_out.put(buffer[:rightmost_newline_split])
-            print("p2 emitted")
-            buffer = buffer[rightmost_newline_split:]
-
-    def _p3_parse_data(self, q_in: Queue, q_out: Queue) -> None:
-        import io
-
-        import pandas as pd
-
-        while True:
-            lines_block = q_in.get()
-            if not lines_block:
-                # End of stream.
-                q_out.put(None)
-                break
-            # Parse data block.
-            data_io = io.StringIO(lines_block)
-            df_block = pd.read_table(data_io, names=self.FIELDS, header=None)
-            q_out.put(df_block)
-            print("p3 emitted")
-
-    def _p4_split_by_chromosome(self, q_in: Queue, q_out: Queue) -> None:
-        while True:
-            df_block = q_in.get()
-            if df_block is None:
-                # End of stream.
-                q_out.put(None)
-                break
-            # Split data block by chromosome.
-            df_block_by_chromosome = [
-                (key, group)
-                for key, group in df_block.groupby("chromosome", sort=False)
-            ]
-            q_out.put(df_block_by_chromosome)
-            print("p4 emitted")
 
     def _split_final_data(
         self, qtl_group: str, chromosome: str, block_index: int, df: pd.DataFrame
@@ -309,46 +224,89 @@ class ParseData(beam.DoFn):
             )
             block_index += 1
 
-    def process(
-        self,
-        record: Dict[str, Any],
-    ) -> Iterator[tuple[str, str, int, pd.DataFrame]]:
-        """Process one input file and yield block records ready for Parquet writing.
+    def _p1_fetch_data_from_uri(self, q_out: Queue, uri: str) -> None:
+        import gzip
+        import io
+        import typing
 
-        Args:
-            record (Dict[str, Any]): A record describing one input file and its attributes.
+        with resilient_urlopen(uri) as compressed_stream:
+            # See: https://stackoverflow.com/a/58407810.
+            compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
+            with gzip.GzipFile(fileobj=compressed_stream_typed) as uncompressed_stream:
+                uncompressed_stream_typed = typing.cast(
+                    typing.IO[bytes], uncompressed_stream
+                )
+                with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
+                    # Skip header.
+                    text_stream.readline()
+                    while True:
+                        # Read more data from the URI source.
+                        text_block = text_stream.read(self.fetch_chunk_size)
+                        if not text_block:
+                            # End of stream.
+                            q_out.put(None)
+                            break
+                        q_out.put(text_block)
+                        print(f"p1 emitted > {len(text_block)} uncompressed bytes")
 
-        Yields:
-            tuple[str, str, int, pd.DataFrame]: Attribute and data list.
-        """
-        from multiprocessing import Process, Queue
+    def _p2_emit_complete_line_blocks(self, q_in: Queue, q_out: Queue) -> None:
+        # Initialise buffer.
+        buffer = ""
+        while True:
+            text_block = q_in.get()
+            buffer += text_block
+            # If we don't have any data, this means we reached the end of the stream.
+            if not buffer:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Find the rightmost newline so that we always emit blocks of complete records.
+            rightmost_newline_split = buffer.rfind("\n") + 1
+            q_out.put(buffer[:rightmost_newline_split])
+            print(f"p2 emitted > {rightmost_newline_split} uncompressed bytes")
+            buffer = buffer[rightmost_newline_split:]
+
+    def _p3_parse_data(self, q_in: Queue, q_out: Queue) -> None:
+        import io
 
         import pandas as pd
 
-        assert (
-            record["study"] == "GTEx_V8"
-        ), "Only GTEx_V8 studies are currently supported."
-        qtl_group = record["qtl_group"]
+        while True:
+            lines_block = q_in.get()
+            if not lines_block:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Parse data block.
+            data_io = io.StringIO(lines_block)
+            df_block = pd.read_table(data_io, names=FIELDS, header=None)
+            q_out.put(df_block)
+            print(f"p3 emitted >> {len(df_block)} Pandas records")
 
-        # Set up concurrent execution.
-        q1, q2, q3, q4 = [Queue() for _ in range(4)]
-        processes = [
-            Process(target=self._p1_fetch_data_from_uri, args=(record["ftp_path"], q1)),
-            Process(target=self._p2_emit_complete_line_blocks, args=(q1, q2)),
-            Process(target=self._p3_parse_data, args=(q2, q3)),
-            Process(target=self._p4_split_by_chromosome, args=(q3, q4)),
-        ]
-        for p in processes:
-            p.start()
+    def _p4_split_by_chromosome(self, q_in: Queue, q_out: Queue) -> None:
+        while True:
+            df_block = q_in.get()
+            if df_block is None:
+                # End of stream.
+                q_out.put(None)
+                break
+            # Split data block by chromosome.
+            df_block_by_chromosome = [
+                (key, group)
+                for key, group in df_block.groupby("chromosome", sort=False)
+            ]
+            q_out.put(df_block_by_chromosome)
+            print(f"p4 emitted >> {len(df_block_by_chromosome)} blocks")
 
+    def _p5_emit_final_blocks(self, q_in: Queue, q_out: Queue, qtl_group: str) -> None:
         # Initialise counters.
         current_chromosome = ""
         current_block_index = 0
-        current_data_block = pd.DataFrame(columns=self.FIELDS)
+        current_data_block = pd.DataFrame(columns=FIELDS)
 
         # Process.
         while True:
-            df_block_by_chromosome = q4.get()
+            df_block_by_chromosome = q_in.get()
             if not df_block_by_chromosome:
                 # End of stream.
                 break
@@ -377,13 +335,13 @@ class ParseData(beam.DoFn):
                     current_block_index,
                     current_data_block,
                 ):
-                    yield block
+                    q_out.put(block)
                 # Emit all chromosomes in the block except the last one (if any are present) because they are complete.
                 for chromosome, chromosome_block in df_block_by_chromosome[:-1]:
                     for block in self._split_final_data(
                         qtl_group, chromosome, 0, chromosome_block
                     ):
-                        yield block
+                        q_out.put(block)
                 # And then set current chromosome to the last chromosome in the block.
                 current_chromosome, current_data_block = df_block_by_chromosome[-1]
                 current_block_index = 0
@@ -391,7 +349,9 @@ class ParseData(beam.DoFn):
             # If we have enough data for the chromosome we are currently processing, we can emit some blocks already.
             while len(current_data_block) >= self.emit_ready_buffer:
                 emit_block = current_data_block[: self.emit_block_size]
-                yield (qtl_group, current_chromosome, current_block_index, emit_block)
+                q_out.put(
+                    (qtl_group, current_chromosome, current_block_index, emit_block)
+                )
                 current_block_index += 1
                 current_data_block = current_data_block[self.emit_block_size :]
 
@@ -400,48 +360,80 @@ class ParseData(beam.DoFn):
             for block in self._split_final_data(
                 qtl_group, current_chromosome, current_block_index, current_data_block
             ):
-                yield block
+                q_out.put(block)
 
-        # Close process pool.
-        processes[-1].join()
-
-
-class WriteData(beam.DoFn):
-    """Write a block of records to Parquet format."""
-
-    EQTL_CATALOGUE_OUPUT_BASE = EQTL_CATALOGUE_OUPUT_BASE
-    PYARROW_SCHEMA = PYARROW_SCHEMA
-    FIELDS = FIELDS
-
-    def process(self, element: tuple[str, str, int, pd.DataFrame]) -> None:
+    def _p6_write_parquet(self, q_in: Queue) -> None:
         """Write a Parquet file for a given input file.
 
         Args:
             element (tuple[str, str, int, pd.DataFrame]): key and grouped values.
         """
-        qtl_group, chromosome, chunk_number, df = element
-        output_filename = (
-            f"{self.EQTL_CATALOGUE_OUPUT_BASE}/"
-            "analysisType=eQTL/"
-            "sourceId=eQTL_Catalogue/"
-            "projectId=GTEx_V8/"
-            f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
-            f"chromosome={chromosome}/"  # Example: 13.
-            f"part-{chunk_number:05}.snappy.parquet"
-        )
-        df.to_parquet(output_filename, compression="snappy")
+        while True:
+            element = q_in.get()
+            if not element:
+                # End of stream.
+                break
+            qtl_group, chromosome, chunk_number, df = element
+            output_filename = (
+                f"{EQTL_CATALOGUE_OUPUT_BASE}/"
+                "analysisType=eQTL/"
+                "sourceId=eQTL_Catalogue/"
+                "projectId=GTEx_V8/"
+                f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
+                f"chromosome={chromosome}/"  # Example: 13.
+                f"part-{chunk_number:05}.snappy.parquet"
+            )
+            df.to_parquet(output_filename, compression="snappy")
+            print(f"OUTPUT > {output_filename}")
+
+    def process(
+        self,
+        record: Dict[str, Any],
+    ) -> None:
+        """Process one input file and yield block records ready for Parquet writing.
+
+        Args:
+            record (Dict[str, Any]): A record describing one input file and its attributes.
+
+        Yields:
+            tuple[str, str, int, pd.DataFrame]: Attribute and data list.
+        """
+        # Set up concurrent execution.
+        q1, q2, q3, q4, q5 = [Queue() for _ in range(5)]
+        processes = [
+            Process(target=self._p1_fetch_data_from_uri, args=(q1, record["ftp_path"])),
+            Process(target=self._p2_emit_complete_line_blocks, args=(q1, q2)),
+            Process(target=self._p3_parse_data, args=(q2, q3)),
+            Process(target=self._p4_split_by_chromosome, args=(q3, q4)),
+            Process(
+                target=self._p5_emit_final_blocks, args=(q4, q5, record["qtl_group"])
+            ),
+            Process(target=self._p6_write_parquet, args=(q5,)),
+        ]
+        for p in processes:
+            p.start()
+
+        # Wait until the final process completes.
+        processes[-1].join()
 
 
-def run_pipeline() -> None:
-    """Define and run the Apache Beam pipeline."""
-    with beam.Pipeline(options=PipelineOptions()) as pipeline:
-        (
-            pipeline
-            | "List input files" >> beam.Create(get_input_files())
-            | "Parse data" >> beam.ParDo(ParseData())
-            | "Write to Parquet" >> beam.ParDo(WriteData())
-        )
+def process(batch_index: int) -> None:
+    """Process one input file."""
+
+    # Read the study index and select one study.
+    df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
+    record = df.loc[batch_index].to_dict()
+
+    # Process the study.
+    ParseData().process(record)
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    # Are we running on Google Cloud?
+    batch_index = os.environ.get("BATCH_TASK_INDEX")
+
+    if batch_index:
+        # We are running inside Google Cloud, let's process one file.
+        process(int(batch_index))
+    else:
+        raise NotImplementedError
