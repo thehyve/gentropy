@@ -84,6 +84,9 @@ class ParseData(beam.DoFn):
 
             Args:
                 uri (str): The URI to read the data from.
+
+            Raises:
+                NotImplementedError: If the protocol is not HTTP(s) or FTP.
             """
             import ftplib
             import os.path
@@ -103,15 +106,20 @@ class ParseData(beam.DoFn):
                         )
                     elif uri.startswith("ftp"):
                         parsed_uri = urllib.parse.urlparse(uri)
-                        path, filename = os.path.split(parsed_uri.path[1:])
-                        with ftplib.FTP(parsed_uri.netloc) as ftp:
+                        self.ftp_server = parsed_uri.netloc
+                        self.ftp_path, self.ftp_filename = os.path.split(
+                            parsed_uri.path[1:]
+                        )
+                        with ftplib.FTP(self.ftp_server) as ftp:
                             ftp.login()
-                            ftp.cwd(path)
-                            length = ftp.size(filename)
+                            ftp.cwd(self.ftp_path)
+                            length = ftp.size(self.ftp_filename)
                             assert (
                                 length is not None
-                            ), f"FTP server returned no length for {uri}"
+                            ), f"FTP server returned no length for {uri}."
                             self.content_length = length
+                    else:
+                        raise NotImplementedError(f"Unsupported URI schema: {uri}.")
                     break
                 except Exception:
                     time.sleep(5 + random.random())
@@ -145,24 +153,37 @@ class ParseData(beam.DoFn):
 
             Raises:
                 Exception: If a block could not be read from the URI exceeding the maximum delay time.
+                NotImplementedError: If the protocol is not HTTP(s) or FTP.
             """
+            import ftplib
             import random
             import time
             import urllib.request
 
             # If the buffer isn't enough to serve next block, we need to extend it first.
             while (size > len(self.buffer)) and (self.position != self.content_length):
-                byte_range = (
-                    f"bytes={self.position}-{self.position + self.block_size - 1}"
-                )
-                request = urllib.request.Request(
-                    self.uri, headers={"Range": byte_range}
-                )
                 delay = self.delay_initial
                 total_delay = 0.0
                 while True:
                     try:
-                        block = urllib.request.urlopen(request).read()
+                        if self.uri.startswith("http"):
+                            byte_range = f"bytes={self.position}-{self.position + self.block_size - 1}"
+                            request = urllib.request.Request(
+                                self.uri, headers={"Range": byte_range}
+                            )
+                            block = urllib.request.urlopen(request).read()
+                        elif self.uri.startswith("ftp"):
+                            with ftplib.FTP(self.ftp_server) as ftp:
+                                ftp.login()
+                                ftp.cwd(self.ftp_path)
+                                with ftp.transfercmd(
+                                    f"RETR {self.ftp_filename}", rest=self.position
+                                ) as server_socket:
+                                    block = server_socket.recv(self.block_size)
+                        else:
+                            raise NotImplementedError(
+                                f"Unsupported URI schema: {self.uri}."
+                            )
                         self.buffer += block
                         self.position += len(block)
                         break
@@ -265,14 +286,14 @@ class ParseData(beam.DoFn):
         assert (
             record["study"] == "GTEx_V8"
         ), "Only GTEx_V8 studies are currently supported."
-        http_path = record["ftp_path"].replace("ftp://", "http://")
+        # http_path = record["ftp_path"].replace("ftp://", "http://")
         qtl_group = record["qtl_group"]
 
         current_chromosome = ""
         current_block_index = 0
         current_data_block = pd.DataFrame(columns=self.FIELDS)
 
-        for data_block in self._fetch_data_in_blocks(http_path):
+        for data_block in self._fetch_data_in_blocks(record["ftp_path"]):
             # Parse data block.
             data_io = io.StringIO(data_block)
             df_block = pd.read_table(data_io, names=self.FIELDS, header=None)
