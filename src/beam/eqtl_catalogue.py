@@ -54,7 +54,7 @@ class ParseData(beam.DoFn):
     FIELDS = FIELDS
 
     # How many lines of raw data to fetch and parse at once.
-    fetch_chunk_size = 50_000
+    fetch_chunk_size = 5_000_000
 
     # How many records, on average, to try and keep in each Parquet partition.
     emit_block_size = 500_000
@@ -77,7 +77,7 @@ class ParseData(beam.DoFn):
         # Value obtained by trial and error experimentation.
         # Slower values bring too much delay into the computation cycle.
         # Larger values cause slower buffer turnaround & slicing when serving data.
-        block_size = 2 * 1024 * 1024
+        block_size = 20 * 1024 * 1024
 
         def __init__(self, uri: str):
             """Initialise the class.
@@ -85,14 +85,36 @@ class ParseData(beam.DoFn):
             Args:
                 uri (str): The URI to read the data from.
             """
+            import ftplib
+            import os.path
+            import random
+            import time
+            import urllib.parse
             import urllib.request
 
             self.uri = uri
             self.buffer = b""
             self.position = 0
-            self.content_length = int(
-                urllib.request.urlopen(uri).getheader("Content-Length")
-            )
+            while True:
+                try:
+                    if uri.startswith("http"):
+                        self.content_length = int(
+                            urllib.request.urlopen(uri).getheader("Content-Length")
+                        )
+                    elif uri.startswith("ftp"):
+                        parsed_uri = urllib.parse.urlparse(uri)
+                        path, filename = os.path.split(parsed_uri.path[1:])
+                        with ftplib.FTP(parsed_uri.netloc) as ftp:
+                            ftp.login()
+                            ftp.cwd(path)
+                            length = ftp.size(filename)
+                            assert (
+                                length is not None
+                            ), f"FTP server returned no length for {uri}"
+                            self.content_length = length
+                    break
+                except Exception:
+                    time.sleep(5 + random.random())
             assert self.content_length > 0
 
         def __enter__(self) -> "ParseData.resilient_urlopen":
@@ -129,7 +151,7 @@ class ParseData(beam.DoFn):
             import urllib.request
 
             # If the buffer isn't enough to serve next block, we need to extend it first.
-            if (size > len(self.buffer)) and (self.position != self.content_length):
+            while (size > len(self.buffer)) and (self.position != self.content_length):
                 byte_range = (
                     f"bytes={self.position}-{self.position + self.block_size - 1}"
                 )
@@ -270,13 +292,14 @@ class ParseData(beam.DoFn):
             # we append the data from the block to the current chromosome block.
             if first_chromosome_in_block == current_chromosome:
                 current_data_block = pd.concat(
-                    [current_data_block, df_block_by_chromosome[0][1]]
+                    [current_data_block, df_block_by_chromosome[0][1]],
+                    ignore_index=True,
                 )
                 df_block_by_chromosome = df_block_by_chromosome[1:]
 
-            # If we have any more chromosomes in the block, then we should emit:
+            # If we have any more chromosomes in the block, then we should:
             if df_block_by_chromosome:
-                # The current chromosome.
+                # Emit the current chromosome.
                 for block in self._split_final_data(
                     qtl_group,
                     current_chromosome,
@@ -284,7 +307,7 @@ class ParseData(beam.DoFn):
                     current_data_block,
                 ):
                     yield block
-                # All chromosomes in the block except the last one (if any are present) because they are complete.
+                # Emit all chromosomes in the block except the last one (if any are present) because they are complete.
                 for chromosome, chromosome_block in df_block_by_chromosome[:-1]:
                     for block in self._split_final_data(
                         qtl_group, chromosome, 0, chromosome_block
