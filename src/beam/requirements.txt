@@ -1,3 +1,4 @@
 pandas
 fsspec
+ftputil
 gcsfs

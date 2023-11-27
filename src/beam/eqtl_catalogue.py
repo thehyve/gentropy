@@ -155,10 +155,11 @@ class ParseData(beam.DoFn):
                 Exception: If a block could not be read from the URI exceeding the maximum delay time.
                 NotImplementedError: If the protocol is not HTTP(s) or FTP.
             """
-            import ftplib
             import random
             import time
             import urllib.request
+
+            import ftputil
 
             # If the buffer isn't enough to serve next block, we need to extend it first.
             while (size > len(self.buffer)) and (self.position != self.content_length):
@@ -173,13 +174,15 @@ class ParseData(beam.DoFn):
                             )
                             block = urllib.request.urlopen(request).read()
                         elif self.uri.startswith("ftp"):
-                            with ftplib.FTP(self.ftp_server) as ftp:
-                                ftp.login()
-                                ftp.cwd(self.ftp_path)
-                                with ftp.transfercmd(
-                                    f"RETR {self.ftp_filename}", rest=self.position
-                                ) as server_socket:
-                                    block = server_socket.recv(self.block_size)
+                            with ftputil.FTPHost(
+                                self.ftp_server, "anonymous", "anonymous"
+                            ) as ftp_host:
+                                with ftp_host.open(
+                                    f"{self.ftp_path}/{self.ftp_filename}",
+                                    mode="rb",
+                                    rest=self.position,
+                                ) as stream:
+                                    block = stream.read(self.block_size)
                         else:
                             raise NotImplementedError(
                                 f"Unsupported URI schema: {self.uri}."
