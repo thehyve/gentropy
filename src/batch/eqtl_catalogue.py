@@ -413,7 +413,7 @@ class ParseData:
                 current_block_index = 0
                 current_data_block = pd.DataFrame(columns=FIELDS)
 
-            # If the new chromosome is "None", is means we have reached end of stream.
+            # If the new chromosome is empty, is means we have reached end of stream.
             if not current_chromosome:
                 q_out.put(None)
                 break

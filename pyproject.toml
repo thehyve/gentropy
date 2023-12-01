@@ -19,7 +19,7 @@ hydra-core = "^1.3.2"
 pyliftover = "^0.4"
 xgboost = "^1.7.3"
 scikit-learn = "^1.2.1"
-numpy = ">=1.14"
+numpy = "^1.26.1"
 hail = "0.2.126"
 pyarrow = "^14.0.1"
 wandb = "^0.16.0"
@@ -89,7 +89,7 @@ color = true
 exclude = ["dist"]
 
 [tool.pytest.ini_options]
-addopts = "-n auto --doctest-modules --cov=src/ --cov-report=xml --ignore ./src/beam"
+addopts = "-n auto --doctest-modules --cov=src/ --cov-report=xml --ignore ./src/batch"
 pythonpath = [
     ".",
     "./src/airflow/dags"
