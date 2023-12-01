@@ -12,7 +12,7 @@ from queue import Empty
 from typing import Any, Callable, Dict, List
 
 import pandas as pd
-from resilient_urlopen import resilient_urlopen
+from resilient_fetch import ResilientFetch
 from typing_extensions import Never
 
 EQTL_CATALOGUE_OUPUT_BASE = (
@@ -105,7 +105,7 @@ class SparkPrep:
             """
             return typing.cast(typing.IO[bytes], x)
 
-        with cast_to_bytes(resilient_urlopen(uri)) as gzip_stream:
+        with cast_to_bytes(ResilientFetch(uri)) as gzip_stream:
             with cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
                 with io.TextIOWrapper(bytes_stream) as text_stream:
                     # Process field names.

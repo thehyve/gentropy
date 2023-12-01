@@ -1,12 +1,12 @@
 """Resilient retrieval of HTTP(S) and FTP data with block-level retries.
 
-The "resilient_urlopen" class, which is contained in this module, provides an interface similar to urllib.request.urlopen and allows a URL to be read as a bytes stream. However, in contrast to the urllib implementation, if a transient error occurs partway through the input file, then only the failed part is retried.
+The "ResilientFetch" class, which is contained in this module, provides an interface similar to urllib.request.urlopen and allows a URL to be read as a bytes stream. However, in contrast to the urllib implementation, if a transient error occurs partway through the input file, then only the failed part is retried.
 
 This module currently supports HTTP(S) and FTP protocols. In order for it to work, the server must support resumable downloads, which is true for most modern HTTP(S) and FTP servers.
 
 Usage:
     ```
-    with resilient_urlopen("http://example.com") as bytes_stream:
+    with ResilientFetch("http://example.com") as bytes_stream:
         # Any usual bytes stream processing.
         # Retries are handled seamlessly by the class under the hood.
     ```
@@ -25,7 +25,7 @@ from typing import Any
 import ftputil
 
 
-class resilient_urlopen:
+class ResilientFetch:
     """Resilient HTTP and FTP data retrieval."""
 
     # Delay values in seconds.
@@ -78,11 +78,11 @@ class resilient_urlopen:
                 time.sleep(5 + random.random())
         assert self.content_length > 0
 
-    def __enter__(self) -> "resilient_urlopen":
+    def __enter__(self) -> ResilientFetch:
         """Stream reading entry point.
 
         Returns:
-            resilient_urlopen: An instance of the class
+            ResilientFetch: An instance of the class
         """
         return self
 
