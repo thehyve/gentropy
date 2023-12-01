@@ -346,40 +346,40 @@ class ParseData:
                 break
 
     def _p4_split_by_chromosome(
-        self, q_in: Queue[pd.DataFrame | None], q_out: Queue[List[pd.DataFrame] | None]
+        self,
+        q_in: Queue[pd.DataFrame | None],
+        q_out: Queue[tuple[str, pd.DataFrame | None]],
     ) -> None:
         """Split Pandas dataframes by chromosome.
 
         Args:
-            q_in (Queue[pd.DataFrame | None]): Input queue with Pandas dataframes.
-            q_out (Queue[List[pd.DataFrame] | None]): Output queue with Pandas dataframes broken down by chromosome.
+            q_in (Queue[pd.DataFrame | None]): Input queue with Pandas dataframes, possibly containing more than one chromosome.
+            q_out (Queue[tuple[str, pd.DataFrame | None]]): Output queue with Pandas dataframes, containing a part of exactly one chromosome.
         """
         while True:
             t1 = time.time()
             df_block = q_in.get()
             if df_block is None:
                 # End of stream.
-                q_out.put(None)
+                q_out.put(("", None))
                 break
             sys.stderr.write(f"p4 [{int((time.time() - t1)*1000)}]\n")
 
             # Split data block by chromosome.
-            df_block_by_chromosome = [
-                (key, group)
-                for key, group in df_block.groupby("chromosome", sort=False)
-            ]
-            q_out.put(df_block_by_chromosome)
+            grouped_data = df_block.groupby("chromosome", sort=False)
+            for chromosome_id, chromosome_data in grouped_data:
+                q_out.put((chromosome_id, chromosome_data))
 
     def _p5_emit_final_blocks(
         self,
-        q_in: Queue[List[pd.DataFrame] | None],
+        q_in: Queue[tuple[str, pd.DataFrame | None]],
         q_out: Queue[pd.DataFrame | None],
         qtl_group: str,
     ) -> None:
         """Emit blocks ready for saving.
 
         Args:
-            q_in (Queue[List[pd.DataFrame] | None]): Input queue with lists of Pandas dataframes split by chromosome.
+            q_in (Queue[tuple[str, pd.DataFrame | None]]): Input queue with Pandas dataframes split by chromosome.
             q_out (Queue[pd.DataFrame | None]): Output queue with ready to output Pandas dataframes.
             qtl_group (str): QTL group identifier, used as study identifier for output.
         """
@@ -390,31 +390,18 @@ class ParseData:
 
         # Process.
         while True:
+            # Get more data from the queue.
             t1 = time.time()
             df_block_by_chromosome = q_in.get()
             sys.stderr.write(f"p5 [{int((time.time() - t1)*1000)}]\n")
-            if df_block_by_chromosome is None:
-                # End of stream.
-                break
-
-            first_chromosome_in_block = df_block_by_chromosome[0][0]
+            chromosome_id, chromosome_data = df_block_by_chromosome
 
             # If this is the first block we ever see, initialise "current_chromosome".
             if not current_chromosome:
-                current_chromosome = first_chromosome_in_block
+                current_chromosome = chromosome_id
 
-            # If the block starts with the chromosome we are currently processing (this is going to almost always be the case),
-            # we append the data from the block to the current chromosome block.
-            if first_chromosome_in_block == current_chromosome:
-                current_data_block = pd.concat(
-                    [current_data_block, df_block_by_chromosome[0][1]],
-                    ignore_index=True,
-                )
-                df_block_by_chromosome = df_block_by_chromosome[1:]
-
-            # If we have any more chromosomes in the block, then we should:
-            if df_block_by_chromosome:
-                # Emit the current chromosome.
+            # If chromosome is changed, we need to first emit the previous one.
+            if chromosome_id != current_chromosome:
                 for block in self._split_final_data(
                     qtl_group,
                     current_chromosome,
@@ -422,15 +409,20 @@ class ParseData:
                     current_data_block,
                 ):
                     q_out.put(block)
-                # Emit all chromosomes in the block except the last one (if any are present) because they are complete.
-                for chromosome, chromosome_block in df_block_by_chromosome[:-1]:
-                    for block in self._split_final_data(
-                        qtl_group, chromosome, 0, chromosome_block
-                    ):
-                        q_out.put(block)
-                # And then set current chromosome to the last chromosome in the block.
-                current_chromosome, current_data_block = df_block_by_chromosome[-1]
+                current_chromosome = chromosome_id
                 current_block_index = 0
+                current_data_block = pd.DataFrame(columns=FIELDS)
+
+            # If the new chromosome is "None", is means we have reached end of stream.
+            if not current_chromosome:
+                q_out.put(None)
+                break
+
+            # We should now append new data to the chromosome buffer.
+            current_data_block = pd.concat(
+                [current_data_block, chromosome_data],
+                ignore_index=True,
+            )
 
             # If we have enough data for the chromosome we are currently processing, we can emit some blocks already.
             while len(current_data_block) >= self.emit_ready_buffer:
@@ -440,16 +432,6 @@ class ParseData:
                 )
                 current_block_index += 1
                 current_data_block = current_data_block[self.emit_block_size :]
-
-        # Finally, if we have any data remaining at the end of processing, we should emit it.
-        if len(current_data_block):
-            for block in self._split_final_data(
-                qtl_group, current_chromosome, current_block_index, current_data_block
-            ):
-                q_out.put(block)
-
-        # Indicate to the next step that the processing is done.
-        q_out.put(None)
 
     def _write_parquet(self, element: List[Any]) -> None:
         """Write a single Parquet file.
