@@ -22,35 +22,11 @@ from typing import Any, Dict, Iterator, List
 
 import ftputil
 import pandas as pd
-import pyarrow
 from typing_extensions import Never
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
 EQTL_CATALOGUE_OUPUT_BASE = (
     "gs://genetics_etl_python_playground/1-smart-mirror/summary_stats"
-)
-FIELDS = [
-    "variant",
-    "r2",
-    "pvalue",
-    "molecular_trait_object_id",
-    "molecular_trait_id",
-    "maf",
-    "gene_id",
-    "median_tpm",
-    "beta",
-    "se",
-    "an",
-    "ac",
-    "chromosome",
-    "position",
-    "ref",
-    "alt",
-    "type",
-    "rsid",
-]
-PYARROW_SCHEMA = pyarrow.schema(
-    [(field_name, pyarrow.string()) for field_name in FIELDS]
 )
 
 
@@ -204,6 +180,9 @@ class ParseData:
     # Denotes when the look-ahead buffer is long enough to emit a block from it.
     emit_ready_buffer = emit_block_size * (emit_look_ahead_factor + 1)
 
+    # List of field names of the data. Populated by the first step (_p1_fetch_data_from_uri).
+    field_names = None
+
     def _split_final_data(
         self, qtl_group: str, chromosome: str, block_index: int, df: pd.DataFrame
     ) -> Iterator[tuple[str, str, int, pd.DataFrame]]:
@@ -244,8 +223,9 @@ class ParseData:
                     typing.IO[bytes], uncompressed_stream
                 )
                 with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
-                    # Skip header.
-                    text_stream.readline()
+                    # Process field names.
+                    self.field_names = text_stream.readline().split("\t")
+                    # Process data.
                     while True:
                         t1 = time.time()
                         # Read more data from the URI source.
@@ -296,7 +276,9 @@ class ParseData:
             pd.DataFrame: a Pandas dataframe with parsed data.
         """
         data_io = io.StringIO(lines_block)
-        df_block = pd.read_table(data_io, names=FIELDS, header=None)
+        df_block = pd.read_table(
+            data_io, names=self.field_names, header=None, dtype=str
+        )
         return df_block
 
     def _p3_parse_data(
@@ -386,7 +368,7 @@ class ParseData:
         # Initialise counters.
         current_chromosome = ""
         current_block_index = 0
-        current_data_block = pd.DataFrame(columns=FIELDS)
+        current_data_block = pd.DataFrame(columns=self.field_names)
 
         # Process.
         while True:
@@ -411,7 +393,7 @@ class ParseData:
                     q_out.put(block)
                 current_chromosome = chromosome_id
                 current_block_index = 0
-                current_data_block = pd.DataFrame(columns=FIELDS)
+                current_data_block = pd.DataFrame(columns=self.field_names)
 
             # If the new chromosome is empty, is means we have reached end of stream.
             if not current_chromosome:
