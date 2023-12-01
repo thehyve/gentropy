@@ -226,15 +226,15 @@ class ParseData:
     # List of field names of the data. Populated by the first step (_p1_fetch_data_from_uri).
     field_names = None
 
-    def _p1_fetch_data_from_uri(self, q_out: Queue[str], uri: str) -> None:
+    def _p1_fetch_data_from_uri(self, q_out: Queue[str | None], uri: str) -> None:
         """Fetch data from the URI in blocks.
 
         Args:
-            q_out (Queue[str]): Output queue with uncompressed text blocks.
+            q_out (Queue[str | None]): Output queue with uncompressed text blocks.
             uri (str): URI to fetch the data from.
         """
 
-        def __cast_to_bytes(x: Any) -> typing.IO[bytes]:
+        def cast_to_bytes(x: Any) -> typing.IO[bytes]:
             """Casts a given object to bytes. For rationale, see: https://stackoverflow.com/a/58407810.
 
             Args:
@@ -245,8 +245,8 @@ class ParseData:
             """
             return typing.cast(typing.IO[bytes], x)
 
-        with __cast_to_bytes(resilient_urlopen(uri)) as gzip_stream:
-            with __cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
+        with cast_to_bytes(resilient_urlopen(uri)) as gzip_stream:
+            with cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
                 with io.TextIOWrapper(bytes_stream) as text_stream:
                     # Process field names.
                     self.field_names = text_stream.readline().split("\t")
@@ -254,21 +254,24 @@ class ParseData:
                     while True:
                         # Read more data from the URI source.
                         text_block = text_stream.read(self.fetch_chunk_size)
-                        q_out.put(text_block)
-                        # Handle end of stream.
-                        if not text_block:
+                        if text_block:
+                            # Emit block for downstream processing.
+                            q_out.put(text_block)
+                        else:
+                            # We have reached end of stream.
+                            q_out.put(None)
                             break
 
     def _p2_emit_complete_line_blocks(
         self,
-        q_in: Queue[str],
-        q_out: Queue[str],
+        q_in: Queue[str | None],
+        q_out: Queue[str | None],
     ) -> None:
         """Given text blocks, emit blocks which contain complete text lines.
 
         Args:
-            q_in (Queue[str]): Input queue with data blocks.
-            q_out (Queue[str]): Output queue with data blocks which are guaranteed to contain only complete lines.
+            q_in (Queue[str | None]): Input queue with data blocks.
+            q_out (Queue[str | None]): Output queue with data blocks which are guaranteed to contain only complete lines.
         """
         # Initialise buffer for storing incomplete lines.
         buffer = ""
@@ -276,28 +279,34 @@ class ParseData:
         while True:
             # Get more data from the input queue.
             text_block = q_in.get()
-            buffer += text_block
-            # Find the rightmost newline so that we always emit blocks of complete records.
-            rightmost_newline_split = buffer.rfind("\n") + 1
-            q_out.put(buffer[:rightmost_newline_split])
-            buffer = buffer[rightmost_newline_split:]
-            # Handle end of stream.
-            if not text_block:
+            if text_block is not None:
+                # Process text block.
+                buffer += text_block
+                # Find the rightmost newline so that we always emit blocks of complete records.
+                rightmost_newline_split = buffer.rfind("\n") + 1
+                q_out.put(buffer[:rightmost_newline_split])
+                buffer = buffer[rightmost_newline_split:]
+            else:
+                # We have reached end of stream. Because buffer only contains *incomplete* lines, it should be empty.
+                assert (
+                    not buffer
+                ), "Expected buffer to be empty at the end of stream, but incomplete lines are found."
+                q_out.put(None)
                 break
 
     def _p3_parse_data(
         self,
-        q_in: Queue[str],
+        q_in: Queue[str | None],
         q_out: Queue[pd.DataFrame | None],
     ) -> None:
         """Parse complete-line data blocks into Pandas dataframes, utilising multiple workers.
 
         Args:
-            q_in (Queue[str]): Input queue with complete-line text data blocks.
+            q_in (Queue[str | None]): Input queue with complete-line text data blocks.
             q_out (Queue[pd.DataFrame | None]): Output queue with Pandas dataframes.
         """
 
-        def __parse_data(lines_block: str) -> pd.DataFrame:
+        def parse_data(lines_block: str) -> pd.DataFrame:
             """Parse a data block with complete lines into a Pandas dataframe.
 
             Args:
@@ -312,40 +321,7 @@ class ParseData:
             )
             return df_block
 
-        # This step is the bottleneck, so we want to do processing in two processes.
-        parse_pool = Pool(8)
-        pool_blocks = []
-        upstream_queue_finished = False
-        t1 = time.time()
-        while True:
-            # If the upstream queue hasn't finished, let's check it.
-            if not upstream_queue_finished:
-                try:
-                    lines_block = q_in.get(block=False)
-                    # If we are here then there's something in the queue.
-                    if lines_block is None:
-                        # The upstream queue has completed.
-                        upstream_queue_finished = True
-                    else:
-                        # Submit the block for processing.
-                        pool_blocks.append(
-                            parse_pool.apply_async(__parse_data, (lines_block,))
-                        )
-                        sys.stderr.write(f"p3 [{int((time.time() - t1)*1000)}]\n")
-                        t1 = time.time()
-                except Empty:
-                    # There's nothing in the queue so far.
-                    pass
-            # If we have submitted some blocks currently pending, let's see if the next one has completed.
-            if pool_blocks:
-                if pool_blocks[0].ready():
-                    # It has completed, let's pass this to the next step and remove from the list of pending jobs.
-                    q_out.put(pool_blocks[0].get())
-                    pool_blocks = pool_blocks[1:]
-            # If the upstream queue has ended *and* there are no pending jobs, let's close the stream.
-            if upstream_queue_finished and not pool_blocks:
-                q_out.put(None)
-                break
+        process_in_pool(q_in=q_in, q_out=q_out, function=parse_data)
 
     def _p4_split_by_chromosome(
         self,
