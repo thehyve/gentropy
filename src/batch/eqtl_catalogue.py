@@ -3,16 +3,27 @@
 
 from __future__ import annotations
 
+import ftplib
+import gzip
+import io
 import json
-import os
+import math
+import os.path
+import random
 import sys
+import time
+import typing
+import urllib.parse
+import urllib.request
 from multiprocessing import Process, Queue
 from multiprocessing.pool import Pool
 from queue import Empty
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, List
 
+import ftputil
 import pandas as pd
 import pyarrow
+from typing_extensions import Never
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
 EQTL_CATALOGUE_OUPUT_BASE = (
@@ -63,13 +74,6 @@ class resilient_urlopen:
         Raises:
             NotImplementedError: If the protocol is not HTTP(s) or FTP.
         """
-        import ftplib
-        import os.path
-        import random
-        import time
-        import urllib.parse
-        import urllib.request
-
         self.uri = uri
         self.buffer = b""
         self.buffer_position = 0
@@ -101,11 +105,11 @@ class resilient_urlopen:
                 time.sleep(5 + random.random())
         assert self.content_length > 0
 
-    def __enter__(self) -> "ParseData.resilient_urlopen":
+    def __enter__(self) -> resilient_urlopen:
         """Stream reading entry point.
 
         Returns:
-            ParseData.resilient_urlopen: An instance of the class
+            resilient_urlopen: An instance of the class
         """
         return self
 
@@ -131,12 +135,6 @@ class resilient_urlopen:
             Exception: If a block could not be read from the URI exceeding the maximum delay time.
             NotImplementedError: If the protocol is not HTTP(s) or FTP.
         """
-        import random
-        import time
-        import urllib.request
-
-        import ftputil
-
         # Trim spent part of the buffer, if necessary
         if self.buffer_position > self.fetch_block_size:
             self.buffer_position -= self.fetch_block_size
@@ -191,9 +189,6 @@ class resilient_urlopen:
         return data
 
 
-import time
-
-
 class ParseData:
     """Parse data."""
 
@@ -223,8 +218,6 @@ class ParseData:
         Yields:
             tuple[str, str, int, pd.DataFrame]: Tuple of values to generate the final Parquet file.
         """
-        import math
-
         number_of_blocks = max(round(len(df) / self.emit_block_size), 1)
         records_per_block = math.ceil(len(df) / number_of_blocks)
         for index in range(0, len(df), records_per_block):
@@ -236,11 +229,13 @@ class ParseData:
             )
             block_index += 1
 
-    def _p1_fetch_data_from_uri(self, q_out: Queue, uri: str) -> None:
-        import gzip
-        import io
-        import typing
+    def _p1_fetch_data_from_uri(self, q_out: Queue[str | None], uri: str) -> None:
+        """Fetch data from the URI in blocks.
 
+        Args:
+            q_out (Queue[str | None]): Output queue where to put the uncompressed text blocks.
+            uri (str): URI to fetch the data from.
+        """
         with resilient_urlopen(uri) as compressed_stream:
             # See: https://stackoverflow.com/a/58407810.
             compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
@@ -264,9 +259,15 @@ class ParseData:
 
     def _p2_emit_complete_line_blocks(
         self,
-        q_in: Queue,
-        q_out: Queue,
+        q_in: Queue[str | None],
+        q_out: Queue[str | None],
     ) -> None:
+        """Given text blocks, emit blocks which contain complete text lines.
+
+        Args:
+            q_in (Queue[str | None]): Input queue with data blocks.
+            q_out (Queue[str | None]): Output queue with data blocks which are guaranteed to contain only complete lines.
+        """
         # Initialise buffer.
         buffer = ""
         while True:
@@ -286,17 +287,29 @@ class ParseData:
             buffer = buffer[rightmost_newline_split:]
 
     def _parse_data(self, lines_block: str) -> pd.DataFrame:
-        import io
+        """Parse a data block with complete lines into a Pandas dataframe.
 
+        Args:
+            lines_block (str): A text block containing complete lines.
+
+        Returns:
+            pd.DataFrame: a Pandas dataframe with parsed data.
+        """
         data_io = io.StringIO(lines_block)
         df_block = pd.read_table(data_io, names=FIELDS, header=None)
         return df_block
 
     def _p3_parse_data(
         self,
-        q_in: Queue,
-        q_out: Queue,
+        q_in: Queue[str | None],
+        q_out: Queue[pd.DataFrame | None],
     ) -> None:
+        """Parse complete-line data blocks into Pandas dataframes, utilising multiple workers.
+
+        Args:
+            q_in (Queue[str | None]): Input queue with complete-line text data blocks.
+            q_out (Queue[pd.DataFrame | None]): Output queue with Pandas dataframes.
+        """
         # This step is the bottleneck, so we want to do processing in two processes.
         parse_pool = Pool(8)
         pool_blocks = []
@@ -332,7 +345,15 @@ class ParseData:
                 q_out.put(None)
                 break
 
-    def _p4_split_by_chromosome(self, q_in: Queue, q_out: Queue) -> None:
+    def _p4_split_by_chromosome(
+        self, q_in: Queue[pd.DataFrame | None], q_out: Queue[List[pd.DataFrame] | None]
+    ) -> None:
+        """Split Pandas dataframes by chromosome.
+
+        Args:
+            q_in (Queue[pd.DataFrame | None]): Input queue with Pandas dataframes.
+            q_out (Queue[List[pd.DataFrame] | None]): Output queue with Pandas dataframes broken down by chromosome.
+        """
         while True:
             t1 = time.time()
             df_block = q_in.get()
@@ -349,7 +370,19 @@ class ParseData:
             ]
             q_out.put(df_block_by_chromosome)
 
-    def _p5_emit_final_blocks(self, q_in: Queue, q_out: Queue, qtl_group: str) -> None:
+    def _p5_emit_final_blocks(
+        self,
+        q_in: Queue[List[pd.DataFrame] | None],
+        q_out: Queue[pd.DataFrame | None],
+        qtl_group: str,
+    ) -> None:
+        """Emit blocks ready for saving.
+
+        Args:
+            q_in (Queue[List[pd.DataFrame] | None]): Input queue with lists of Pandas dataframes split by chromosome.
+            q_out (Queue[pd.DataFrame | None]): Output queue with ready to output Pandas dataframes.
+            qtl_group (str): QTL group identifier, used as study identifier for output.
+        """
         # Initialise counters.
         current_chromosome = ""
         current_block_index = 0
@@ -418,7 +451,12 @@ class ParseData:
         # Indicate to the next step that the processing is done.
         q_out.put(None)
 
-    def _write_parquet(self, element: Any) -> None:
+    def _write_parquet(self, element: List[Any]) -> None:
+        """Write a single Parquet file.
+
+        Args:
+            element (List[Any]): Input data.
+        """
         qtl_group, chromosome, chunk_number, df = element
         output_filename = (
             f"{EQTL_CATALOGUE_OUPUT_BASE}/"
@@ -429,14 +467,13 @@ class ParseData:
             f"chromosome={chromosome}/"  # Example: 13.
             f"part-{chunk_number:05}.snappy.parquet"
         )
-        # output_filename = f"/tmp/parquet_{chromosome}_{chunk_number}.parquet"
         df.to_parquet(output_filename, compression="snappy")
 
-    def _p6_write_parquet(self, q_in: Queue) -> None:
+    def _p6_write_parquet(self, q_in: Queue[pd.DataFrame | None]) -> None:
         """Write a Parquet file for a given input file.
 
         Args:
-            element (tuple[str, str, int, pd.DataFrame]): key and grouped values.
+            q_in (Queue[pd.DataFrame | None]): Input queue with Pandas dataframes to output.
         """
         parquet_pool = Pool(8)
         pool_blocks = []
@@ -475,26 +512,25 @@ class ParseData:
         self,
         record: Dict[str, Any],
     ) -> None:
-        """Process one input file and yield block records ready for Parquet writing.
+        """Process one input file start to finish.
 
         Args:
             record (Dict[str, Any]): A record describing one input file and its attributes.
-
-        Yields:
-            tuple[str, str, int, pd.DataFrame]: Attribute and data list.
         """
         # Set up queues for process exchange.
-        q1, q2, q3, q4, q5 = [Queue(maxsize=32) for _ in range(5)]
+        q: List[Queue[Never]] = [Queue(maxsize=32) for _ in range(5)]
         processes = [
-            Process(target=self._p1_fetch_data_from_uri, args=(q1, record["ftp_path"])),
-            Process(target=self._p2_emit_complete_line_blocks, args=(q1, q2)),
-            Process(target=self._p3_parse_data, args=(q2, q3)),
-            Process(target=self._p4_split_by_chromosome, args=(q3, q4)),
+            Process(
+                target=self._p1_fetch_data_from_uri, args=(q[0], record["ftp_path"])
+            ),
+            Process(target=self._p2_emit_complete_line_blocks, args=(q[0], q[1])),
+            Process(target=self._p3_parse_data, args=(q[1], q[2])),
+            Process(target=self._p4_split_by_chromosome, args=(q[2], q[3])),
             Process(
                 target=self._p5_emit_final_blocks,
-                args=(q4, q5, record["qtl_group"]),
+                args=(q[3], q[4], record["qtl_group"]),
             ),
-            Process(target=self._p6_write_parquet, args=(q5,)),
+            Process(target=self._p6_write_parquet, args=(q[4],)),
         ]
         for p in processes:
             p.start()
@@ -504,8 +540,11 @@ class ParseData:
 
 
 def process(batch_index: int) -> None:
-    """Process one input file."""
+    """Process one input file.
 
+    Args:
+        batch_index (int): The index the current job among all batch jobs.
+    """
     # Read the study index and select one study.
     df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
     record = df.loc[batch_index].to_dict()
@@ -515,6 +554,15 @@ def process(batch_index: int) -> None:
 
 
 def generate_job_config(number_of_tasks: int, max_parallelism: int = 50) -> str:
+    """Generate configuration for a Google Batch job.
+
+    Args:
+        number_of_tasks (int): How many tasks are there going to be in the batch.
+        max_parallelism (int): The maximum number of concurrently running tasks.
+
+    Returns:
+        str: Google Batch job config in JSON format.
+    """
     config = {
         "taskGroups": [
             {
