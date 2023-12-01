@@ -7,7 +7,7 @@ gsutil cp eqtl_catalogue.py gs://genetics_etl_python_playground/batch/eqtl_catal
 gsutil cp eqtl_catalogue.sh gs://genetics_etl_python_playground/batch/eqtl_catalogue/eqtl_catalogue.sh
 # Submit the batch job.
 gcloud batch jobs submit \
-  eqtl-catalogue19 \
+  eqtl-catalogue24 \
   --config config.json \
   --location europe-west1
 ```
