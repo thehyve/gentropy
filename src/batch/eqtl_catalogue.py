@@ -211,8 +211,8 @@ class ParseData:
                         # Read more data from the URI source.
                         text_block = text_stream.read(self.fetch_chunk_size)
                         q_out.put(text_block)
+                        # Handle end of stream.
                         if not text_block:
-                            # End of stream.
                             break
 
     def _p2_emit_complete_line_blocks(
@@ -226,33 +226,30 @@ class ParseData:
             q_in (Queue[str]): Input queue with data blocks.
             q_out (Queue[str]): Output queue with data blocks which are guaranteed to contain only complete lines.
         """
-        # Initialise buffer.
+        # Initialise buffer for storing incomplete lines.
         buffer = ""
+        # Process data.
         while True:
-            t1 = time.time()
+            # Get more data from the input queue.
             text_block = q_in.get()
-            sys.stderr.write(f"p2 [{int((time.time() - t1)*1000)}]\n")
-            if text_block is None:
-                # End of stream.
-                if buffer:
-                    q_out.put(buffer)
-                q_out.put(None)
-                break
             buffer += text_block
             # Find the rightmost newline so that we always emit blocks of complete records.
             rightmost_newline_split = buffer.rfind("\n") + 1
             q_out.put(buffer[:rightmost_newline_split])
             buffer = buffer[rightmost_newline_split:]
+            # Handle end of stream.
+            if not text_block:
+                break
 
     def _p3_parse_data(
         self,
-        q_in: Queue[str | None],
+        q_in: Queue[str],
         q_out: Queue[pd.DataFrame | None],
     ) -> None:
         """Parse complete-line data blocks into Pandas dataframes, utilising multiple workers.
 
         Args:
-            q_in (Queue[str | None]): Input queue with complete-line text data blocks.
+            q_in (Queue[str]): Input queue with complete-line text data blocks.
             q_out (Queue[pd.DataFrame | None]): Output queue with Pandas dataframes.
         """
 
