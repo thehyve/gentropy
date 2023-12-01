@@ -182,45 +182,49 @@ class ParseData:
     # List of field names of the data. Populated by the first step (_p1_fetch_data_from_uri).
     field_names = None
 
-    def _p1_fetch_data_from_uri(self, q_out: Queue[str | None], uri: str) -> None:
+    def _p1_fetch_data_from_uri(self, q_out: Queue[str], uri: str) -> None:
         """Fetch data from the URI in blocks.
 
         Args:
-            q_out (Queue[str | None]): Output queue where to put the uncompressed text blocks.
+            q_out (Queue[str]): Output queue with uncompressed text blocks.
             uri (str): URI to fetch the data from.
         """
-        with resilient_urlopen(uri) as compressed_stream:
-            # See: https://stackoverflow.com/a/58407810.
-            compressed_stream_typed = typing.cast(typing.IO[bytes], compressed_stream)
-            with gzip.GzipFile(fileobj=compressed_stream_typed) as uncompressed_stream:
-                uncompressed_stream_typed = typing.cast(
-                    typing.IO[bytes], uncompressed_stream
-                )
-                with io.TextIOWrapper(uncompressed_stream_typed) as text_stream:
+
+        def __cast_to_bytes(x: Any) -> typing.IO[bytes]:
+            """Casts a given object to bytes. For rationale, see: https://stackoverflow.com/a/58407810.
+
+            Args:
+                x (Any): object to cast to bytes.
+
+            Returns:
+                typing.IO[bytes]: object cast to bytes.
+            """
+            return typing.cast(typing.IO[bytes], x)
+
+        with __cast_to_bytes(resilient_urlopen(uri)) as gzip_stream:
+            with __cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
+                with io.TextIOWrapper(bytes_stream) as text_stream:
                     # Process field names.
                     self.field_names = text_stream.readline().split("\t")
                     # Process data.
                     while True:
-                        t1 = time.time()
                         # Read more data from the URI source.
                         text_block = text_stream.read(self.fetch_chunk_size)
+                        q_out.put(text_block)
                         if not text_block:
                             # End of stream.
-                            q_out.put(None)
                             break
-                        q_out.put(text_block)
-                        sys.stderr.write(f"p1 [{int((time.time() - t1)*1000)}]\n")
 
     def _p2_emit_complete_line_blocks(
         self,
-        q_in: Queue[str | None],
-        q_out: Queue[str | None],
+        q_in: Queue[str],
+        q_out: Queue[str],
     ) -> None:
         """Given text blocks, emit blocks which contain complete text lines.
 
         Args:
-            q_in (Queue[str | None]): Input queue with data blocks.
-            q_out (Queue[str | None]): Output queue with data blocks which are guaranteed to contain only complete lines.
+            q_in (Queue[str]): Input queue with data blocks.
+            q_out (Queue[str]): Output queue with data blocks which are guaranteed to contain only complete lines.
         """
         # Initialise buffer.
         buffer = ""
