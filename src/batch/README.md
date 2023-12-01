@@ -1,13 +1,17 @@
 ## How to run a batch job
+
+Set up:
 ```bash
-# Prepare and upload config.
-python3 eqtl_catalogue.py > config.json
-# Upload the script.
-gsutil cp eqtl_catalogue.py gs://genetics_etl_python_playground/batch/eqtl_catalogue/eqtl_catalogue.py
-gsutil cp eqtl_catalogue.sh gs://genetics_etl_python_playground/batch/eqtl_catalogue/eqtl_catalogue.sh
-# Submit the batch job.
+export MODULE=eqtl_catalogue
+```
+
+Run:
+```bash
+# Upload code.
+gsutil -m cp -r . gs://genetics_etl_python_playground/batch/code
+# Submit batch job.
 gcloud batch jobs submit \
-  eqtl-catalogue24 \
-  --config config.json \
+  "${MODULE}-$(date --utc +"%Y%m%d-%H%M%S")" \
+  --config <(python3 ${MODULE}.py) \
   --location europe-west1
 ```
