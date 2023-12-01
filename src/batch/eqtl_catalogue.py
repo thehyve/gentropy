@@ -166,7 +166,7 @@ class resilient_urlopen:
 
 def process_in_pool(
     q_in: Queue[Any],
-    q_out: Queue[Any],
+    q_out: Queue[Any] | None,
     function: Callable[[Any], Any],
     number_of_workers: int = 4,
 ) -> None:
@@ -174,7 +174,7 @@ def process_in_pool(
 
     Args:
         q_in (Queue[Any]): input queue.
-        q_out (Queue[Any]): output queue.
+        q_out (Queue[Any] | None): output queue.
         function (Callable[[Any], Any]): function which is used to process input queue objects into output queue objects, one at a time.
         number_of_workers (int): number of workers in the pool.
     """
@@ -200,20 +200,24 @@ def process_in_pool(
         if pool_blocks:
             if pool_blocks[0].ready():
                 # It has completed, let's pass this to the next step and remove from the list of pending jobs.
-                q_out.put(pool_blocks[0].get())
+                if q_out:
+                    q_out.put(pool_blocks[0].get())
                 pool_blocks = pool_blocks[1:]
         # If the upstream queue has ended *and* there are no pending jobs, let's close the stream.
         if upstream_queue_finished and not pool_blocks:
-            q_out.put(None)
+            if q_out:
+                q_out.put(None)
             break
 
 
 class ParseData:
     """Parse data."""
 
+    # Configuration for step 1: fetching data from URI.
     # How many bytes of raw (uncompressed) data to fetch and parse at once.
     fetch_chunk_size = 100_000_000
 
+    # Configuration for step 5: partitioning data blocks.
     # How many records, on average, to try and keep in each Parquet partition.
     emit_block_size = 500_000
     # How much of a look-ahead buffer to keep (times the `emit_block_size`)
@@ -429,17 +433,13 @@ class ParseData:
             q_in (Queue[tuple[str, str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
         """
 
-        def __write_parquet(
-            qtl_group: str, chromosome: str, chunk_number: int, df: pd.DataFrame
-        ) -> None:
+        def write_parquet(data: tuple[str, str, int, pd.DataFrame]) -> None:
             """Write a single Parquet file.
 
             Args:
-                qtl_group (str): QTL group ID, used as study ID.
-                chromosome (str): Chromosome ID.
-                chunk_number (int): Parquet chunk number to add into the output file name.
-                df (pd.DataFrame): Pandas dataframe with data for the block.
+                data(tuple[str, str, int, pd.DataFrame]): Tuple of QTL group, current chromosome, chunk number, and data to emit.
             """
+            qtl_group, chromosome, chunk_number, df = data
             output_filename = (
                 f"{EQTL_CATALOGUE_OUPUT_BASE}/"
                 "analysisType=eQTL/"
@@ -451,38 +451,7 @@ class ParseData:
             )
             df.to_parquet(output_filename, compression="snappy")
 
-        parquet_pool = Pool(8)
-        pool_blocks = []
-        upstream_queue_finished = False
-        t1 = time.time()
-
-        while True:
-            # If the upstream queue hasn't finished, let's check it.
-            if not upstream_queue_finished:
-                try:
-                    element = q_in.get(block=False)
-                    # If we are here then there's something in the queue.
-                    if element is None:
-                        # The upstream queue has completed.
-                        upstream_queue_finished = True
-                    else:
-                        # Submit the block for processing.
-                        pool_blocks.append(
-                            parquet_pool.apply_async(__write_parquet, element)
-                        )
-                        sys.stderr.write(f"p6 [{int((time.time() - t1)*1000)}]\n")
-                        t1 = time.time()
-                except Empty:
-                    # There's nothing in the queue so far.
-                    pass
-            # If we have submitted some blocks currently pending, let's see if the next one has completed.
-            if pool_blocks:
-                if pool_blocks[0].ready():
-                    # It has completed, let's remove from the list of pending jobs.
-                    pool_blocks = pool_blocks[1:]
-            # If the upstream queue has ended *and* there are no pending jobs, let's close the stream.
-            if upstream_queue_finished and not pool_blocks:
-                break
+        process_in_pool(q_in=q_in, q_out=None, function=write_parquet)
 
     def process(
         self,
