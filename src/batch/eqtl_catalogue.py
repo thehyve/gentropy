@@ -373,14 +373,14 @@ class ParseData:
     def _p5_emit_final_blocks(
         self,
         q_in: Queue[tuple[str, pd.DataFrame | None]],
-        q_out: Queue[pd.DataFrame | None],
+        q_out: Queue[tuple[str, str, int, pd.DataFrame] | None],
         qtl_group: str,
     ) -> None:
         """Emit blocks ready for saving.
 
         Args:
             q_in (Queue[tuple[str, pd.DataFrame | None]]): Input queue with Pandas dataframes split by chromosome.
-            q_out (Queue[pd.DataFrame | None]): Output queue with ready to output Pandas dataframes.
+            q_out (Queue[tuple[str, str, int, pd.DataFrame] | None]): Output queue with ready to output metadata + data.
             qtl_group (str): QTL group identifier, used as study identifier for output.
         """
         # Initialise counters.
@@ -433,13 +433,17 @@ class ParseData:
                 current_block_index += 1
                 current_data_block = current_data_block[self.emit_block_size :]
 
-    def _write_parquet(self, element: List[Any]) -> None:
+    def _write_parquet(
+        self, qtl_group: str, chromosome: str, chunk_number: int, df: pd.DataFrame
+    ) -> None:
         """Write a single Parquet file.
 
         Args:
-            element (List[Any]): Input data.
+            qtl_group (str): QTL group ID, used as study ID.
+            chromosome (str): Chromosome ID.
+            chunk_number (int): Parquet chunk number to add into the output file name.
+            df (pd.DataFrame): Pandas dataframe with data for the block.
         """
-        qtl_group, chromosome, chunk_number, df = element
         output_filename = (
             f"{EQTL_CATALOGUE_OUPUT_BASE}/"
             "analysisType=eQTL/"
@@ -451,11 +455,13 @@ class ParseData:
         )
         df.to_parquet(output_filename, compression="snappy")
 
-    def _p6_write_parquet(self, q_in: Queue[pd.DataFrame | None]) -> None:
+    def _p6_write_parquet(
+        self, q_in: Queue[tuple[str, str, int, pd.DataFrame] | None]
+    ) -> None:
         """Write a Parquet file for a given input file.
 
         Args:
-            q_in (Queue[pd.DataFrame | None]): Input queue with Pandas dataframes to output.
+            q_in (Queue[tuple[str, str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
         """
         parquet_pool = Pool(8)
         pool_blocks = []
@@ -474,7 +480,7 @@ class ParseData:
                     else:
                         # Submit the block for processing.
                         pool_blocks.append(
-                            parquet_pool.apply_async(self._write_parquet, (element,))
+                            parquet_pool.apply_async(self._write_parquet, element)
                         )
                         sys.stderr.write(f"p6 [{int((time.time() - t1)*1000)}]\n")
                         t1 = time.time()
