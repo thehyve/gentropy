@@ -347,13 +347,13 @@ class ParseData:
                 q_out.put(("", None))
                 break
 
-    def _p5_emit_final_blocks(
+    def _p5_partition_data_blocks(
         self,
         q_in: Queue[tuple[str, pd.DataFrame | None]],
         q_out: Queue[tuple[str, str, int, pd.DataFrame] | None],
         qtl_group: str,
     ) -> None:
-        """Emit blocks ready for saving.
+        """Process stream of data blocks and partition them.
 
         Args:
             q_in (Queue[tuple[str, pd.DataFrame | None]]): Input queue with Pandas dataframes split by chromosome.
@@ -365,19 +365,17 @@ class ParseData:
         current_block_index = 0
         current_data_block = pd.DataFrame(columns=self.field_names)
 
-        # Process.
+        # Process blocks.
         while True:
             # Get more data from the queue.
-            t1 = time.time()
             df_block_by_chromosome = q_in.get()
-            sys.stderr.write(f"p5 [{int((time.time() - t1)*1000)}]\n")
             chromosome_id, chromosome_data = df_block_by_chromosome
 
             # If this is the first block we ever see, initialise "current_chromosome".
             if not current_chromosome:
                 current_chromosome = chromosome_id
 
-            # If chromosome is changed, we need to emit the previous one.
+            # If chromosome has changed (including to None incicating end of stream), we need to emit the previous one.
             if chromosome_id != current_chromosome:
                 # Calculate the optimal number of blocks.
                 number_of_blocks = max(
@@ -402,25 +400,25 @@ class ParseData:
                 current_block_index = 0
                 current_data_block = pd.DataFrame(columns=self.field_names)
 
-            # If the new chromosome is empty, is means we have reached end of stream.
-            if not current_chromosome:
+            if current_chromosome is not None:
+                # We have a new chromosome to process.
+                # We should now append new data to the chromosome buffer.
+                current_data_block = pd.concat(
+                    [current_data_block, chromosome_data],
+                    ignore_index=True,
+                )
+                # If we have enough data for the chromosome we are currently processing, we can emit some blocks already.
+                while len(current_data_block) >= self.emit_ready_buffer:
+                    emit_block = current_data_block[: self.emit_block_size]
+                    q_out.put(
+                        (qtl_group, current_chromosome, current_block_index, emit_block)
+                    )
+                    current_block_index += 1
+                    current_data_block = current_data_block[self.emit_block_size :]
+            else:
+                # We have reached end of stream.
                 q_out.put(None)
                 break
-
-            # We should now append new data to the chromosome buffer.
-            current_data_block = pd.concat(
-                [current_data_block, chromosome_data],
-                ignore_index=True,
-            )
-
-            # If we have enough data for the chromosome we are currently processing, we can emit some blocks already.
-            while len(current_data_block) >= self.emit_ready_buffer:
-                emit_block = current_data_block[: self.emit_block_size]
-                q_out.put(
-                    (qtl_group, current_chromosome, current_block_index, emit_block)
-                )
-                current_block_index += 1
-                current_data_block = current_data_block[self.emit_block_size :]
 
     def _p6_write_parquet(
         self, q_in: Queue[tuple[str, str, int, pd.DataFrame] | None]
@@ -505,7 +503,7 @@ class ParseData:
             Process(target=self._p3_parse_data, args=(q[1], q[2])),
             Process(target=self._p4_split_by_chromosome, args=(q[2], q[3])),
             Process(
-                target=self._p5_emit_final_blocks,
+                target=self._p5_partition_data_blocks,
                 args=(q[3], q[4], record["qtl_group"]),
             ),
             Process(target=self._p6_write_parquet, args=(q[4],)),
