@@ -18,7 +18,7 @@ import urllib.request
 from multiprocessing import Process, Queue
 from multiprocessing.pool import Pool
 from queue import Empty
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, List
 
 import ftputil
 import pandas as pd
@@ -89,12 +89,11 @@ class resilient_urlopen:
         """
         return self
 
-    def __exit__(self, *args: Any, **kwargs: Any) -> None:
+    def __exit__(self, *args: Any) -> None:
         """Stream reading exit point (empty).
 
         Args:
             *args (Any): ignored.
-            **kwargs (Any): ignored.
         """
         pass
 
@@ -183,31 +182,6 @@ class ParseData:
     # List of field names of the data. Populated by the first step (_p1_fetch_data_from_uri).
     field_names = None
 
-    def _split_final_data(
-        self, qtl_group: str, chromosome: str, block_index: int, df: pd.DataFrame
-    ) -> Iterator[tuple[str, str, int, pd.DataFrame]]:
-        """Process the final chunk of the data and split into partitions as close to self.emit_block_size as possible.
-
-        Args:
-            qtl_group (str): QTL group field used for study ID.
-            chromosome (str): Chromosome identifier.
-            block_index (int): Starting number of the block to emit.
-            df (pd.DataFrame): Remaining chunk data to split.
-
-        Yields:
-            tuple[str, str, int, pd.DataFrame]: Tuple of values to generate the final Parquet file.
-        """
-        number_of_blocks = max(round(len(df) / self.emit_block_size), 1)
-        records_per_block = math.ceil(len(df) / number_of_blocks)
-        for index in range(0, len(df), records_per_block):
-            yield (
-                qtl_group,
-                chromosome,
-                block_index,
-                df[index : index + records_per_block],
-            )
-            block_index += 1
-
     def _p1_fetch_data_from_uri(self, q_out: Queue[str | None], uri: str) -> None:
         """Fetch data from the URI in blocks.
 
@@ -266,21 +240,6 @@ class ParseData:
             q_out.put(buffer[:rightmost_newline_split])
             buffer = buffer[rightmost_newline_split:]
 
-    def _parse_data(self, lines_block: str) -> pd.DataFrame:
-        """Parse a data block with complete lines into a Pandas dataframe.
-
-        Args:
-            lines_block (str): A text block containing complete lines.
-
-        Returns:
-            pd.DataFrame: a Pandas dataframe with parsed data.
-        """
-        data_io = io.StringIO(lines_block)
-        df_block = pd.read_table(
-            data_io, names=self.field_names, header=None, dtype=str
-        )
-        return df_block
-
     def _p3_parse_data(
         self,
         q_in: Queue[str | None],
@@ -292,6 +251,22 @@ class ParseData:
             q_in (Queue[str | None]): Input queue with complete-line text data blocks.
             q_out (Queue[pd.DataFrame | None]): Output queue with Pandas dataframes.
         """
+
+        def __parse_data(lines_block: str) -> pd.DataFrame:
+            """Parse a data block with complete lines into a Pandas dataframe.
+
+            Args:
+                lines_block (str): A text block containing complete lines.
+
+            Returns:
+                pd.DataFrame: a Pandas dataframe with parsed data.
+            """
+            data_io = io.StringIO(lines_block)
+            df_block = pd.read_table(
+                data_io, names=self.field_names, header=None, dtype=str
+            )
+            return df_block
+
         # This step is the bottleneck, so we want to do processing in two processes.
         parse_pool = Pool(8)
         pool_blocks = []
@@ -309,7 +284,7 @@ class ParseData:
                     else:
                         # Submit the block for processing.
                         pool_blocks.append(
-                            parse_pool.apply_async(self._parse_data, (lines_block,))
+                            parse_pool.apply_async(__parse_data, (lines_block,))
                         )
                         sys.stderr.write(f"p3 [{int((time.time() - t1)*1000)}]\n")
                         t1 = time.time()
@@ -382,15 +357,27 @@ class ParseData:
             if not current_chromosome:
                 current_chromosome = chromosome_id
 
-            # If chromosome is changed, we need to first emit the previous one.
+            # If chromosome is changed, we need to emit the previous one.
             if chromosome_id != current_chromosome:
-                for block in self._split_final_data(
-                    qtl_group,
-                    current_chromosome,
-                    current_block_index,
-                    current_data_block,
-                ):
-                    q_out.put(block)
+                # Calculate the optimal number of blocks.
+                number_of_blocks = max(
+                    round(len(current_data_block) / self.emit_block_size), 1
+                )
+                records_per_block = math.ceil(
+                    len(current_data_block) / number_of_blocks
+                )
+                # Emit remaining blocks one by one.
+                for index in range(0, len(current_data_block), records_per_block):
+                    q_out.put(
+                        (
+                            qtl_group,
+                            current_chromosome,
+                            current_block_index,
+                            current_data_block[index : index + records_per_block],
+                        )
+                    )
+                    current_block_index += 1
+                # Reset everything for the next chromosome.
                 current_chromosome = chromosome_id
                 current_block_index = 0
                 current_data_block = pd.DataFrame(columns=self.field_names)
@@ -415,28 +402,6 @@ class ParseData:
                 current_block_index += 1
                 current_data_block = current_data_block[self.emit_block_size :]
 
-    def _write_parquet(
-        self, qtl_group: str, chromosome: str, chunk_number: int, df: pd.DataFrame
-    ) -> None:
-        """Write a single Parquet file.
-
-        Args:
-            qtl_group (str): QTL group ID, used as study ID.
-            chromosome (str): Chromosome ID.
-            chunk_number (int): Parquet chunk number to add into the output file name.
-            df (pd.DataFrame): Pandas dataframe with data for the block.
-        """
-        output_filename = (
-            f"{EQTL_CATALOGUE_OUPUT_BASE}/"
-            "analysisType=eQTL/"
-            "sourceId=eQTL_Catalogue/"
-            "projectId=GTEx_V8/"
-            f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
-            f"chromosome={chromosome}/"  # Example: 13.
-            f"part-{chunk_number:05}.snappy.parquet"
-        )
-        df.to_parquet(output_filename, compression="snappy")
-
     def _p6_write_parquet(
         self, q_in: Queue[tuple[str, str, int, pd.DataFrame] | None]
     ) -> None:
@@ -445,6 +410,29 @@ class ParseData:
         Args:
             q_in (Queue[tuple[str, str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
         """
+
+        def __write_parquet(
+            qtl_group: str, chromosome: str, chunk_number: int, df: pd.DataFrame
+        ) -> None:
+            """Write a single Parquet file.
+
+            Args:
+                qtl_group (str): QTL group ID, used as study ID.
+                chromosome (str): Chromosome ID.
+                chunk_number (int): Parquet chunk number to add into the output file name.
+                df (pd.DataFrame): Pandas dataframe with data for the block.
+            """
+            output_filename = (
+                f"{EQTL_CATALOGUE_OUPUT_BASE}/"
+                "analysisType=eQTL/"
+                "sourceId=eQTL_Catalogue/"
+                "projectId=GTEx_V8/"
+                f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
+                f"chromosome={chromosome}/"  # Example: 13.
+                f"part-{chunk_number:05}.snappy.parquet"
+            )
+            df.to_parquet(output_filename, compression="snappy")
+
         parquet_pool = Pool(8)
         pool_blocks = []
         upstream_queue_finished = False
@@ -462,7 +450,7 @@ class ParseData:
                     else:
                         # Submit the block for processing.
                         pool_blocks.append(
-                            parquet_pool.apply_async(self._write_parquet, element)
+                            parquet_pool.apply_async(__write_parquet, element)
                         )
                         sys.stderr.write(f"p6 [{int((time.time() - t1)*1000)}]\n")
                         t1 = time.time()
