@@ -335,18 +335,17 @@ class ParseData:
             q_out (Queue[tuple[str, pd.DataFrame | None]]): Output queue with Pandas dataframes, containing a part of exactly one chromosome.
         """
         while True:
-            t1 = time.time()
+            # Get new data from the input queue.
             df_block = q_in.get()
-            if df_block is None:
-                # End of stream.
+            if df_block is not None:
+                # Split data block by chromosome.
+                grouped_data = df_block.groupby("chromosome", sort=False)
+                for chromosome_id, chromosome_data in grouped_data:
+                    q_out.put((chromosome_id, chromosome_data))
+            else:
+                # We have reached end of stream.
                 q_out.put(("", None))
                 break
-            sys.stderr.write(f"p4 [{int((time.time() - t1)*1000)}]\n")
-
-            # Split data block by chromosome.
-            grouped_data = df_block.groupby("chromosome", sort=False)
-            for chromosome_id, chromosome_data in grouped_data:
-                q_out.put((chromosome_id, chromosome_data))
 
     def _p5_emit_final_blocks(
         self,
