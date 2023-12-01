@@ -1,4 +1,4 @@
-"""Cloud Batch pipeline to preprocess and partition the eQTL Catalogue."""
+"""Cloud Batch pipeline to preprocess and partition the eQTL Catalogue data."""
 
 from __future__ import annotations
 
@@ -12,20 +12,6 @@ EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue
 EQTL_CATALOGUE_OUPUT_BASE = (
     "gs://genetics_etl_python_playground/1-smart-mirror/summary_stats"
 )
-
-
-def process(batch_index: int) -> None:
-    """Process one input file.
-
-    Args:
-        batch_index (int): The index the current job among all batch jobs.
-    """
-    # Read the study index and select one study.
-    df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
-    record = df.loc[batch_index].to_dict()
-
-    # Process the study.
-    SparkPrep().process(record)
 
 
 def generate_job_config(number_of_tasks: int, max_parallelism: int = 50) -> str:
@@ -85,8 +71,22 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if args:
         # We are running inside Google Cloud, let's process one file.
-        process(int(args[0]))
+        batch_index = int(args[0])
+        # Read the study index and select one study.
+        df = pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH)
+        record = df.loc[batch_index].to_dict()
+        # Process the study.
+        worker = SparkPrep(
+            input_uri=record["ftp_path"],
+            analysis_type="eQTL",
+            source_id="eQTL_Catalogue",
+            project_id="GTEx_V8",
+            study_id=record["qtl_group"],
+            output_base_path=EQTL_CATALOGUE_OUPUT_BASE,
+        )
+        worker.process()
     else:
-        # We are running locally. Need to generate job config.
+        # We are running locally. Let's generate the job config.
+        # For this, we only really need the number of jobs to run.
         number_of_tasks = len(pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH))
         print(generate_job_config(number_of_tasks))

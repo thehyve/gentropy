@@ -6,10 +6,11 @@ import gzip
 import io
 import math
 import typing
+from dataclasses import dataclass
 from multiprocessing import Process, Queue
 from multiprocessing.pool import Pool
 from queue import Empty
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, List
 
 import pandas as pd
 from resilient_fetch import ResilientFetch
@@ -52,7 +53,7 @@ def process_in_pool(
             except Empty:
                 # There's nothing in the queue so far (we need to wait more).
                 pass
-        # If we have submitted some blocks which currently pending, let's see if the *next one* has completed.
+        # If we have submitted some blocks which are currently pending, let's see if the *next one* has completed.
         if pool_blocks:
             if pool_blocks[0].ready():
                 # It has completed, let's pass this to the next step and remove from the list of pending jobs.
@@ -66,6 +67,7 @@ def process_in_pool(
             break
 
 
+@dataclass
 class SparkPrep:
     """Fetch, decompress, parse, partition, and save the data."""
 
@@ -83,15 +85,26 @@ class SparkPrep:
     # Denotes when the look-ahead buffer is long enough to emit a block from it.
     emit_ready_buffer = emit_block_size * (emit_look_ahead_factor + 1)
 
-    # List of field names of the data. Populated by the first step (_p1_fetch_data_from_uri).
+    # List of field names of the data. Populated by the first step (_p1_fetch_data).
     field_names = None
 
-    def _p1_fetch_data_from_uri(self, q_out: Queue[str | None], uri: str) -> None:
+    # Processing parameters, to be set by during class init.
+    input_uri: str
+    analysis_type: str
+    source_id: str
+    project_id: str
+    study_id: str
+    output_base_path: str
+
+    # File parsing parameters, can be overridden during init as well.
+    separator = "\t"
+    chromosome_column_name = "chromosome"
+
+    def _p1_fetch_data(self, q_out: Queue[str | None]) -> None:
         """Fetch data from the URI in blocks.
 
         Args:
             q_out (Queue[str | None]): Output queue with uncompressed text blocks.
-            uri (str): URI to fetch the data from.
         """
 
         def cast_to_bytes(x: Any) -> typing.IO[bytes]:
@@ -105,7 +118,7 @@ class SparkPrep:
             """
             return typing.cast(typing.IO[bytes], x)
 
-        with cast_to_bytes(ResilientFetch(uri)) as gzip_stream:
+        with cast_to_bytes(ResilientFetch(self.input_uri)) as gzip_stream:
             with cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
                 with io.TextIOWrapper(bytes_stream) as text_stream:
                     # Process field names.
@@ -176,8 +189,12 @@ class SparkPrep:
                 pd.DataFrame: a Pandas dataframe with parsed data.
             """
             data_io = io.StringIO(lines_block)
-            df_block = pd.read_table(
-                data_io, names=self.field_names, header=None, dtype=str
+            df_block = pd.read_csv(
+                data_io,
+                sep=self.separator,
+                names=self.field_names,
+                header=None,
+                dtype=str,
             )
             return df_block
 
@@ -199,7 +216,7 @@ class SparkPrep:
             df_block = q_in.get()
             if df_block is not None:
                 # Split data block by chromosome.
-                grouped_data = df_block.groupby("chromosome", sort=False)
+                grouped_data = df_block.groupby(self.chromosome_column_name, sort=False)
                 for chromosome_id, chromosome_data in grouped_data:
                     q_out.put((chromosome_id, chromosome_data))
             else:
@@ -207,18 +224,16 @@ class SparkPrep:
                 q_out.put(("", None))
                 break
 
-    def _p5_partition_data_blocks(
+    def _p5_partition_data(
         self,
         q_in: Queue[tuple[str, pd.DataFrame | None]],
-        q_out: Queue[tuple[str, str, int, pd.DataFrame] | None],
-        qtl_group: str,
+        q_out: Queue[tuple[str, int, pd.DataFrame] | None],
     ) -> None:
         """Process stream of data blocks and partition them.
 
         Args:
             q_in (Queue[tuple[str, pd.DataFrame | None]]): Input queue with Pandas dataframes split by chromosome.
-            q_out (Queue[tuple[str, str, int, pd.DataFrame] | None]): Output queue with ready to output metadata + data.
-            qtl_group (str): QTL group identifier, used as study identifier for output.
+            q_out (Queue[tuple[str, int, pd.DataFrame] | None]): Output queue with ready to output metadata + data.
         """
         # Initialise counters.
         current_chromosome = ""
@@ -248,7 +263,6 @@ class SparkPrep:
                 for index in range(0, len(current_data_block), records_per_block):
                     q_out.put(
                         (
-                            qtl_group,
                             current_chromosome,
                             current_block_index,
                             current_data_block[index : index + records_per_block],
@@ -270,9 +284,7 @@ class SparkPrep:
                 # If we have enough data for the chromosome we are currently processing, we can emit some blocks already.
                 while len(current_data_block) >= self.emit_ready_buffer:
                     emit_block = current_data_block[: self.emit_block_size]
-                    q_out.put(
-                        (qtl_group, current_chromosome, current_block_index, emit_block)
-                    )
+                    q_out.put((current_chromosome, current_block_index, emit_block))
                     current_block_index += 1
                     current_data_block = current_data_block[self.emit_block_size :]
             else:
@@ -281,60 +293,47 @@ class SparkPrep:
                 break
 
     def _p6_write_parquet(
-        self, q_in: Queue[tuple[str, str, int, pd.DataFrame] | None]
+        self, q_in: Queue[tuple[str, int, pd.DataFrame] | None]
     ) -> None:
         """Write a Parquet file for a given input file.
 
         Args:
-            q_in (Queue[tuple[str, str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
+            q_in (Queue[tuple[str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
         """
 
-        def write_parquet(data: tuple[str, str, int, pd.DataFrame]) -> None:
+        def write_parquet(data: tuple[str, int, pd.DataFrame]) -> None:
             """Write a single Parquet file.
 
             Args:
-                data(tuple[str, str, int, pd.DataFrame]): Tuple of QTL group, current chromosome, chunk number, and data to emit.
+                data(tuple[str, int, pd.DataFrame]): Tuple of current chromosome, chunk number, and data to emit.
             """
-            qtl_group, chromosome, chunk_number, df = data
+            chromosome, chunk_number, df = data
             output_filename = (
-                f"{EQTL_CATALOGUE_OUPUT_BASE}/"
-                "analysisType=eQTL/"
-                "sourceId=eQTL_Catalogue/"
-                "projectId=GTEx_V8/"
-                f"studyId={qtl_group}/"  # Example: "Adipose_Subcutaneous".
-                f"chromosome={chromosome}/"  # Example: 13.
+                f"{self.output_base_path}/"
+                f"analysisType={self.analysis_type}/"
+                f"sourceId={self.source_id}/"
+                f"projectId={self.source_id}/"
+                f"studyId={self.study_id}/"
+                f"chromosome={chromosome}/"
                 f"part-{chunk_number:05}.snappy.parquet"
             )
             df.to_parquet(output_filename, compression="snappy")
 
         process_in_pool(q_in=q_in, q_out=None, function=write_parquet)
 
-    def process(
-        self,
-        record: Dict[str, Any],
-    ) -> None:
-        """Process one input file start to finish.
-
-        Args:
-            record (Dict[str, Any]): A record describing one input file and its attributes.
-        """
+    def process(self) -> None:
+        """Process one input file start to finish."""
         # Set up queues for process exchange.
         q: List[Queue[Never]] = [Queue(maxsize=32) for _ in range(5)]
         processes = [
-            Process(
-                target=self._p1_fetch_data_from_uri, args=(q[0], record["ftp_path"])
-            ),
+            Process(target=self._p1_fetch_data, args=(q[0],)),
             Process(target=self._p2_emit_complete_line_blocks, args=(q[0], q[1])),
             Process(target=self._p3_parse_data, args=(q[1], q[2])),
             Process(target=self._p4_split_by_chromosome, args=(q[2], q[3])),
-            Process(
-                target=self._p5_partition_data_blocks,
-                args=(q[3], q[4], record["qtl_group"]),
-            ),
+            Process(target=self._p5_partition_data, args=(q[3], q[4])),
             Process(target=self._p6_write_parquet, args=(q[4],)),
         ]
         for p in processes:
             p.start()
-
         # Wait until the final process completes.
         processes[-1].join()
