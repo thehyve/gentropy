@@ -9,7 +9,7 @@ from batch_common import generate_job_config
 from spark_prep import SparkPrep
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
-EQTL_CATALOGUE_OUPUT_BASE = (
+EQTL_CATALOGUE_OUTPUT_BASE = (
     "gs://genetics_etl_python_playground/1-smart-mirror/summary_stats"
 )
 
@@ -30,7 +30,7 @@ if __name__ == "__main__":
             source_id="eQTL_Catalogue",
             project_id="GTEx_V8",
             study_id=record["qtl_group"],
-            output_base_path=EQTL_CATALOGUE_OUPUT_BASE,
+            output_base_path=EQTL_CATALOGUE_OUTPUT_BASE,
         )
         worker.process()
     else:

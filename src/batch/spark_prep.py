@@ -177,7 +177,7 @@ class SparkPrep:
         gzip_stream = cast_to_bytes(ResilientFetch(self.input_uri))
         bytes_stream = cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream))
         self.text_stream = io.TextIOWrapper(bytes_stream)
-        self.field_names = self.text_stream.readline().split("\t")
+        self.field_names = self.text_stream.readline().rstrip().split("\t")
 
     def _p1_fetch_data(self, q_out: Queue[str | None]) -> None:
         """Fetch data from the URI in blocks.
