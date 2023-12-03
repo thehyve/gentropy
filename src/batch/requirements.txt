@@ -2,3 +2,4 @@ pandas
 fsspec
 ftputil
 gcsfs
+typing-extensions
