@@ -5,9 +5,8 @@ from __future__ import annotations
 import sys
 
 import pandas as pd
+from batch_common import generate_job_config
 from spark_prep import SparkPrep
-
-from utils import generate_job_config
 
 EQTL_CATALOGUE_IMPORTED_PATH = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
 EQTL_CATALOGUE_OUPUT_BASE = (
@@ -36,7 +35,7 @@ if __name__ == "__main__":
         worker.process()
     else:
         # We are running locally. Let's generate the job config.
-        # For this, we only really need the number of jobs to run.
+        # For this, we only really need the total number of jobs to run.
         number_of_tasks = len(pd.read_table(EQTL_CATALOGUE_IMPORTED_PATH))
         print(
             generate_job_config(
