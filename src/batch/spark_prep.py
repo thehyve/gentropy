@@ -143,9 +143,6 @@ class SparkPrep:
     # Denotes when the look-ahead buffer is long enough to emit a block from it.
     emit_ready_buffer = emit_block_size * (emit_look_ahead_factor + 1)
 
-    # List of field names of the data. Populated by the first step (_p1_fetch_data).
-    field_names = None
-
     # Processing parameters, to be set by during class init.
     input_uri: str
     analysis_type: str
@@ -158,12 +155,12 @@ class SparkPrep:
     separator = "\t"
     chromosome_column_name = "chromosome"
 
-    def _p1_fetch_data(self, q_out: Queue[str | None]) -> None:
-        """Fetch data from the URI in blocks.
+    # Data processing streams and parameters. Populated during post-init.
+    data_stream = None
+    field_names = None
 
-        Args:
-            q_out (Queue[str | None]): Output queue with uncompressed text blocks.
-        """
+    def __post_init__(self) -> None:
+        """Post init step."""
 
         def cast_to_bytes(x: Any) -> typing.IO[bytes]:
             """Casts a given object to bytes. For rationale, see: https://stackoverflow.com/a/58407810.
@@ -176,22 +173,30 @@ class SparkPrep:
             """
             return typing.cast(typing.IO[bytes], x)
 
+        # Set up streams.
         with cast_to_bytes(ResilientFetch(self.input_uri)) as gzip_stream:
             with cast_to_bytes(gzip.GzipFile(fileobj=gzip_stream)) as bytes_stream:
                 with io.TextIOWrapper(bytes_stream) as text_stream:
-                    # Process field names.
+                    self.text_stream = text_stream
                     self.field_names = text_stream.readline().split("\t")
-                    # Process data.
-                    while True:
-                        # Read more data from the URI source.
-                        text_block = text_stream.read(self.fetch_chunk_size)
-                        if text_block:
-                            # Emit block for downstream processing.
-                            q_out.put(text_block)
-                        else:
-                            # We have reached end of stream.
-                            q_out.put(None)
-                            break
+
+    def _p1_fetch_data(self, q_out: Queue[str | None]) -> None:
+        """Fetch data from the URI in blocks.
+
+        Args:
+            q_out (Queue[str | None]): Output queue with uncompressed text blocks.
+        """
+        # Process data.
+        while True:
+            # Read more data from the URI source.
+            text_block = self.text_stream.read(self.fetch_chunk_size)
+            if text_block:
+                # Emit block for downstream processing.
+                q_out.put(text_block)
+            else:
+                # We have reached end of stream.
+                q_out.put(None)
+                break
 
     def _p2_emit_complete_line_blocks(
         self,
