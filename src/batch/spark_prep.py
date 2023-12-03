@@ -357,9 +357,13 @@ class SparkPrep:
         )
 
     def process(self) -> None:
-        """Process one input file start to finish."""
+        """Process one input file start to finish.
+
+        Raises:
+            Exception: if one of the processes raises an exception.
+        """
         # Set up queues for process exchange.
-        q: List[Queue[Never]] = [Queue(maxsize=32) for _ in range(5)]
+        q: List[Queue[Never]] = [Queue(maxsize=16) for _ in range(5)]
         processes = [
             Process(target=self._p1_fetch_data, args=(q[0],)),
             Process(target=self._p2_emit_complete_line_blocks, args=(q[0], q[1])),
@@ -368,7 +372,18 @@ class SparkPrep:
             Process(target=self._p5_partition_data, args=(q[3], q[4])),
             Process(target=self._p6_write_parquet, args=(q[4],)),
         ]
+        # Start all processes.
         for p in processes:
             p.start()
-        # Wait until the final process completes.
-        processes[-1].join()
+        # Keep checking if any of the processes has completed or raised an exception.
+        while True:
+            anyone_alive = False
+            for i, p in enumerate(processes):
+                p.join(timeout=5)
+                if p.is_alive():
+                    anyone_alive = True
+                else:
+                    if p.exitcode != 0:
+                        raise Exception(f"Process #{i} has failed.")
+            if not anyone_alive:
+                break
