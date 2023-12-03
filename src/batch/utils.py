@@ -79,7 +79,7 @@ def generate_job_config(
                     "runnables": [
                         {
                             "script": {
-                                "text": f"bash /mnt/share/runner.sh {step_name}",
+                                "text": f"bash /mnt/share/code/runner.sh {step_name}",
                             }
                         }
                     ],
