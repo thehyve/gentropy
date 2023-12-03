@@ -18,7 +18,7 @@ sudo python3 -m pip install --upgrade pip setuptools
 echo $?
 
 echo ">>> Install packages"
-sudo python3 -m pip install -r /mnt/share/code/requirements.tt
+sudo python3 -m pip install -r /mnt/share/code/requirements.txt
 echo $?
 
 echo ">>> Run script"
