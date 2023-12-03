@@ -321,7 +321,7 @@ class SparkPrep:
                 current_block_index = 0
                 current_data_block = pd.DataFrame(columns=self.field_names)
 
-            if current_chromosome is not None:
+            if current_chromosome:
                 # We have a new chromosome to process.
                 # We should now append new data to the chromosome buffer.
                 current_data_block = pd.concat(
