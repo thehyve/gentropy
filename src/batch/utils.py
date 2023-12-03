@@ -6,13 +6,14 @@ import json
 from multiprocessing import Queue
 from multiprocessing.pool import Pool
 from queue import Empty
-from typing import Any, Callable
+from typing import Any, Callable, List
 
 
 def process_in_pool(
     q_in: Queue[Any],
     q_out: Queue[Any] | None,
-    function: Callable[[Any], Any],
+    function: Callable[..., Any],
+    args: List[Any] | None = None,
     number_of_workers: int = 4,
 ) -> None:
     """Processes a Queue in a Pool using multiple workers, making sure that the order of inputs and outputs is respected.
@@ -20,9 +21,12 @@ def process_in_pool(
     Args:
         q_in (Queue[Any]): input queue.
         q_out (Queue[Any] | None): output queue.
-        function (Callable[[Any], Any]): function which is used to process input queue objects into output queue objects, one at a time.
+        function (Callable[..., Any]): function which is used to process input queue objects into output queue objects, one at a time.
+        args (List[Any] | None): list of additional function arguments.
         number_of_workers (int): number of workers in the pool.
     """
+    if args is None:
+        args = []
     pool = Pool(number_of_workers)
     pool_blocks: list[Any] = []
     upstream_queue_finished = False
@@ -34,7 +38,9 @@ def process_in_pool(
                 # If we are here then there's something in the queue, because otherwise it'd throw an exception.
                 if input_data is not None:
                     # Submit the new input data block for processing.
-                    pool_blocks.append(pool.apply_async(function, (input_data,)))
+                    full_args = tuple([input_data] + args)
+                    new_process = pool.apply_async(function, full_args)
+                    pool_blocks.append(new_process)
                 else:
                     # The upstream queue has completed.
                     upstream_queue_finished = True

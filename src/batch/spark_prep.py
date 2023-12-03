@@ -17,6 +17,62 @@ from typing_extensions import Never
 from utils import process_in_pool
 
 
+def parse_data(
+    lines_block: str, field_names: List[str], separator: str
+) -> pd.DataFrame:
+    """Parse a data block with complete lines into a Pandas dataframe.
+
+    Args:
+        lines_block (str): A text block containing complete lines.
+        field_names (List[str]): A list containing field names for parsing the data.
+        separator (str): Data field separator.
+
+    Returns:
+        pd.DataFrame: a Pandas dataframe with parsed data.
+    """
+    assert field_names, "Field names are not specified."
+    data_io = io.StringIO(lines_block)
+    df_block = pd.read_csv(
+        data_io,
+        sep=separator,
+        names=field_names,
+        header=None,
+        dtype=str,
+    )
+    return df_block
+
+
+def write_parquet(
+    data: tuple[str, int, pd.DataFrame],
+    output_base_path: str,
+    analysis_type: str,
+    source_id: str,
+    project_id: str,
+    study_id: str,
+) -> None:
+    """Write a single Parquet file.
+
+    Args:
+        data(tuple[str, int, pd.DataFrame]): Tuple of current chromosome, chunk number, and data to emit.
+        output_base_path (str): Output base path.
+        analysis_type (str): Analysis type.
+        source_id (str): Source ID.
+        project_id (str): Project ID.
+        study_id (str): Study ID.
+    """
+    chromosome, chunk_number, df = data
+    output_filename = (
+        f"{output_base_path}/"
+        f"analysisType={analysis_type}/"
+        f"sourceId={source_id}/"
+        f"projectId={project_id}/"
+        f"studyId={study_id}/"
+        f"chromosome={chromosome}/"
+        f"part-{chunk_number:05}.snappy.parquet"
+    )
+    df.to_parquet(output_filename, compression="snappy")
+
+
 @dataclass
 class SparkPrep:
     """Fetch, decompress, parse, partition, and save the data."""
@@ -128,27 +184,12 @@ class SparkPrep:
             q_in (Queue[str | None]): Input queue with complete-line text data blocks.
             q_out (Queue[pd.DataFrame | None]): Output queue with Pandas dataframes.
         """
-
-        def parse_data(lines_block: str) -> pd.DataFrame:
-            """Parse a data block with complete lines into a Pandas dataframe.
-
-            Args:
-                lines_block (str): A text block containing complete lines.
-
-            Returns:
-                pd.DataFrame: a Pandas dataframe with parsed data.
-            """
-            data_io = io.StringIO(lines_block)
-            df_block = pd.read_csv(
-                data_io,
-                sep=self.separator,
-                names=self.field_names,
-                header=None,
-                dtype=str,
-            )
-            return df_block
-
-        process_in_pool(q_in=q_in, q_out=q_out, function=parse_data)
+        process_in_pool(
+            q_in=q_in,
+            q_out=q_out,
+            function=parse_data,
+            args=[self.field_names, self.separator],
+        )
 
     def _p4_split_by_chromosome(
         self,
@@ -250,26 +291,18 @@ class SparkPrep:
         Args:
             q_in (Queue[tuple[str, int, pd.DataFrame] | None]): Input queue with Pandas metadata + data to output.
         """
-
-        def write_parquet(data: tuple[str, int, pd.DataFrame]) -> None:
-            """Write a single Parquet file.
-
-            Args:
-                data(tuple[str, int, pd.DataFrame]): Tuple of current chromosome, chunk number, and data to emit.
-            """
-            chromosome, chunk_number, df = data
-            output_filename = (
-                f"{self.output_base_path}/"
-                f"analysisType={self.analysis_type}/"
-                f"sourceId={self.source_id}/"
-                f"projectId={self.source_id}/"
-                f"studyId={self.study_id}/"
-                f"chromosome={chromosome}/"
-                f"part-{chunk_number:05}.snappy.parquet"
-            )
-            df.to_parquet(output_filename, compression="snappy")
-
-        process_in_pool(q_in=q_in, q_out=None, function=write_parquet)
+        process_in_pool(
+            q_in=q_in,
+            q_out=None,
+            function=write_parquet,
+            args=[
+                self.output_base_path,
+                self.analysis_type,
+                self.source_id,
+                self.project_id,
+                self.study_id,
+            ],
+        )
 
     def process(self) -> None:
         """Process one input file start to finish."""
