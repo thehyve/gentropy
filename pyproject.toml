@@ -88,7 +88,7 @@ build-backend = "poetry.core.masonry.api"
 profile = "black"
 
 [tool.deptry]
-extend_exclude = ["src/conftest.py", "src/airflow", "src/utils"]
+extend_exclude = ["src/conftest.py", "src/airflow", "src/utils", "src/batch"]
 
 [tool.deptry.per_rule_ignores]
 DEP001 = ["otg"]
