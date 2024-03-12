@@ -32,10 +32,15 @@ class GnomADLDMatrix:
         ld_populations (list[str]): List of populations to use to build the LDIndex. Defaults to ["afr", "amr", "asj", "eas", "fin", "nfe", "nwe", "seu"].
     """
 
-    ld_matrix_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
-    ld_index_raw_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
+    # ld_matrix_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
+    ld_matrix_template: str = "s3://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
+    # ld_index_raw_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
+    ld_index_raw_template: str = "s3://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
+    # grch37_to_grch38_chain_path: str = (
+    #     "gs://hail-common/references/grch37_to_grch38.over.chain.gz"
+    # )
     grch37_to_grch38_chain_path: str = (
-        "gs://hail-common/references/grch37_to_grch38.over.chain.gz"
+        "/home/ubuntu/gentropy/chain_hail_37_38/grch37_to_grch38.over.chain.gz"
     )
     ld_populations: list[str] = field(
         default_factory=lambda: [
