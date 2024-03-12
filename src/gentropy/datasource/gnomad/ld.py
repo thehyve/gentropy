@@ -33,9 +33,9 @@ class GnomADLDMatrix:
     """
 
     # ld_matrix_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
-    ld_matrix_template: str = "s3://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
+    ld_matrix_template: str = "s3a://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.adj.ld.bm"
     # ld_index_raw_template: str = "gs://gcp-public-data--gnomad/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
-    ld_index_raw_template: str = "s3://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
+    ld_index_raw_template: str = "s3a://gnomad-public-us-east-1/release/2.1.1/ld/gnomad.genomes.r2.1.1.{POP}.common.ld.variant_indices.ht"
     # grch37_to_grch38_chain_path: str = (
     #     "gs://hail-common/references/grch37_to_grch38.over.chain.gz"
     # )
