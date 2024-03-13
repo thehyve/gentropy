@@ -4,6 +4,7 @@ set -ex
 
 SPARK_HOME=${SPARK_HOME:-$(find_spark_home.py)}
 mkdir ${SPARK_HOME}/conf/
+touch ${SPARK_HOME}/conf/spark-defaults.conf
 
 if [ ! -e ${SPARK_HOME}/jars/hadoop-aws-3.2.0.jar ]
 then
