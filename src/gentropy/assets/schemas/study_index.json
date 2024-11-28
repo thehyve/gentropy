@@ -22,7 +22,7 @@
     {
       "name": "traitFromSource",
       "type": "string",
-      "nullable": false,
+      "nullable": true,
       "metadata": {}
     },
     {
@@ -36,7 +36,29 @@
       "metadata": {}
     },
     {
+      "name": "diseaseIds",
+      "type": {
+        "type": "array",
+        "elementType": "string",
+        "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+    },
+    {
       "name": "geneId",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "biosampleFromSourceId",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "biosampleId",
       "type": "string",
       "nullable": true,
       "metadata": {}
@@ -73,6 +95,16 @@
     },
     {
       "name": "backgroundTraitFromSourceMappedIds",
+      "type": {
+        "type": "array",
+        "elementType": "string",
+        "containsNull": true
+      },
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "backgroundDiseaseIds",
       "type": {
         "type": "array",
         "elementType": "string",
@@ -222,6 +254,23 @@
     {
       "name": "hasSumstats",
       "type": "boolean",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "condition",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "sumstatQCValues",
+      "type": {
+        "type": "map",
+        "keyType": "string",
+        "valueType": "float",
+        "valueContainsNull": true
+      },
       "nullable": true,
       "metadata": {}
     }

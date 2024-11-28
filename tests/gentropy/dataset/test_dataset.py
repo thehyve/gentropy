@@ -1,12 +1,15 @@
 """Test Dataset class."""
+
 from __future__ import annotations
 
+import numpy as np
 import pyspark.sql.functions as f
 import pytest
+from pyspark.sql import SparkSession
+from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
+
 from gentropy.dataset.dataset import Dataset
 from gentropy.dataset.study_index import StudyIndex
-from pyspark.sql import SparkSession
-from pyspark.sql.types import IntegerType, StructField, StructType
 
 
 class MockDataset(Dataset):
@@ -56,3 +59,31 @@ def test_dataset_filter(mock_study_index: StudyIndex) -> None:
         filtered.df.select("studyType").distinct().toPandas()["studyType"].to_list()[0]
         == expected_filter_value
     ), "Filtering failed."
+
+
+def test_dataset_drop_infinity_values() -> None:
+    """drop_infinity_values method shoud remove inf value from standardError field."""
+    spark = SparkSession.getActiveSession()
+    data = [np.Infinity, -np.Infinity, np.inf, -np.inf, np.Inf, -np.Inf, 5.1]
+    rows = [(v,) for v in data]
+    schema = StructType([StructField("field", DoubleType())])
+    input_df = spark.createDataFrame(rows, schema=schema)
+    assert input_df.count() == 7
+    # run without specifying *cols results in no filtering
+    ds = MockDataset(_df=input_df, _schema=schema)
+    assert ds.drop_infinity_values().df.count() == 7
+    # otherwise drop all columns
+    assert ds.drop_infinity_values("field").df.count() == 1
+
+
+def test__process_class_params(spark: SparkSession) -> None:
+    """Test splitting of parameters between class and spark parameters."""
+    params = {
+        "_df": spark.createDataFrame([(1,)], schema=MockDataset.get_schema()),
+        "recursiveFileLookup": True,
+    }
+    class_params, spark_params = Dataset._process_class_params(params)
+    assert "_df" in class_params, "Class params should contain _df"
+    assert (
+        "recursiveFileLookup" in spark_params
+    ), "Spark params should contain recursiveFileLookup"

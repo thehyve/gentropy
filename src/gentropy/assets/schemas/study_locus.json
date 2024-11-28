@@ -4,7 +4,13 @@
       "metadata": {},
       "name": "studyLocusId",
       "nullable": false,
-      "type": "long"
+      "type": "string"
+    },
+    {
+      "metadata": {},
+      "name": "studyType",
+      "nullable": true,
+      "type": "string"
     },
     {
       "metadata": {},
@@ -39,6 +45,12 @@
     {
       "metadata": {},
       "name": "beta",
+      "nullable": true,
+      "type": "double"
+    },
+    {
+      "metadata": {},
+      "name": "zScore",
       "nullable": true,
       "type": "double"
     },
@@ -99,6 +111,30 @@
       "name": "credibleSetlog10BF",
       "nullable": true,
       "type": "double"
+    },
+    {
+      "metadata": {},
+      "name": "purityMeanR2",
+      "nullable": true,
+      "type": "double"
+    },
+    {
+      "metadata": {},
+      "name": "purityMinR2",
+      "nullable": true,
+      "type": "double"
+    },
+    {
+      "metadata": {},
+      "name": "locusStart",
+      "nullable": true,
+      "type": "integer"
+    },
+    {
+      "metadata": {},
+      "name": "locusEnd",
+      "nullable": true,
+      "type": "integer"
     },
     {
       "metadata": {},
@@ -205,6 +241,12 @@
         },
         "type": "array"
       }
+    },
+    {
+      "metadata": {},
+      "name": "confidence",
+      "nullable": true,
+      "type": "string"
     }
   ],
   "type": "struct"

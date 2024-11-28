@@ -1,4 +1,5 @@
 """Unit test configuration."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,8 +9,11 @@ import hail as hl
 import numpy as np
 import pandas as pd
 import pytest
+from pyspark.sql import DataFrame, SparkSession
+
 from gentropy.common.Liftover import LiftOverSpark
 from gentropy.common.session import Session
+from gentropy.dataset.biosample_index import BiosampleIndex
 from gentropy.dataset.colocalisation import Colocalisation
 from gentropy.dataset.gene_index import GeneIndex
 from gentropy.dataset.intervals import Intervals
@@ -21,13 +25,11 @@ from gentropy.dataset.study_index import StudyIndex
 from gentropy.dataset.study_locus import StudyLocus
 from gentropy.dataset.study_locus_overlap import StudyLocusOverlap
 from gentropy.dataset.summary_statistics import SummaryStatistics
-from gentropy.dataset.v2g import V2G
-from gentropy.dataset.variant_annotation import VariantAnnotation
 from gentropy.dataset.variant_index import VariantIndex
+from gentropy.datasource.eqtl_catalogue.finemapping import EqtlCatalogueFinemapping
+from gentropy.datasource.eqtl_catalogue.study_index import EqtlCatalogueStudyIndex
 from gentropy.datasource.gwas_catalog.associations import StudyLocusGWASCatalog
 from gentropy.datasource.gwas_catalog.study_index import StudyIndexGWASCatalog
-from pyspark.sql import DataFrame, SparkSession
-
 from utils.spark import get_spark_testing_conf
 
 
@@ -79,8 +81,12 @@ def mock_colocalisation(spark: SparkSession) -> Colocalisation:
         .withColumnSpec("h2", percentNulls=0.1)
         .withColumnSpec("h3", percentNulls=0.1)
         .withColumnSpec("h4", percentNulls=0.1)
-        .withColumnSpec("log2h4h3", percentNulls=0.1)
         .withColumnSpec("clpp", percentNulls=0.1)
+        .withColumnSpec(
+            "colocalisationMethod",
+            percentNulls=0.0,
+            values=["COLOC", "eCAVIAR"],
+        )
     )
     return Colocalisation(_df=data_spec.build(), _schema=coloc_schema)
 
@@ -181,13 +187,13 @@ def mock_study_locus_data(spark: SparkSession) -> DataFrame:
         )
         .withSchema(sl_schema)
         .withColumnSpec("chromosome", percentNulls=0.1)
-        .withColumnSpec("position", percentNulls=0.1)
+        .withColumnSpec("position", minValue=100, percentNulls=0.1)
         .withColumnSpec("beta", percentNulls=0.1)
         .withColumnSpec("effectAlleleFrequencyFromSource", percentNulls=0.1)
         .withColumnSpec("standardError", percentNulls=0.1)
         .withColumnSpec("subStudyDescription", percentNulls=0.1)
         .withColumnSpec("pValueMantissa", minValue=1, percentNulls=0.1)
-        .withColumnSpec("pValueExponent", minValue=1, percentNulls=0.1)
+        .withColumnSpec("pValueExponent", minValue=-10, percentNulls=0.1)
         .withColumnSpec(
             "qualityControls",
             expr="array(cast(rand() as string))",
@@ -244,70 +250,6 @@ def mock_intervals(spark: SparkSession) -> Intervals:
 
 
 @pytest.fixture()
-def mock_v2g(spark: SparkSession) -> V2G:
-    """Mock v2g dataset."""
-    v2g_schema = V2G.get_schema()
-
-    data_spec = (
-        dg.DataGenerator(
-            spark,
-            rows=400,
-            partitions=4,
-            randomSeedMethod="hash_fieldname",
-        )
-        .withSchema(v2g_schema)
-        .withColumnSpec("distance", percentNulls=0.1)
-        .withColumnSpec("resourceScore", percentNulls=0.1)
-        .withColumnSpec("score", percentNulls=0.1)
-        .withColumnSpec("pmid", percentNulls=0.1)
-        .withColumnSpec("biofeature", percentNulls=0.1)
-        .withColumnSpec("variantFunctionalConsequenceId", percentNulls=0.1)
-        .withColumnSpec("isHighQualityPlof", percentNulls=0.1)
-    )
-
-    return V2G(_df=data_spec.build(), _schema=v2g_schema)
-
-
-@pytest.fixture()
-def mock_variant_annotation(spark: SparkSession) -> VariantAnnotation:
-    """Mock variant annotation."""
-    va_schema = VariantAnnotation.get_schema()
-
-    data_spec = (
-        dg.DataGenerator(
-            spark,
-            rows=400,
-            partitions=4,
-            randomSeedMethod="hash_fieldname",
-        )
-        .withSchema(va_schema)
-        .withColumnSpec("alleleType", percentNulls=0.1)
-        .withColumnSpec("chromosomeB37", percentNulls=0.1)
-        .withColumnSpec("positionB37", percentNulls=0.1)
-        # Nested column handling workaround
-        # https://github.com/databrickslabs/dbldatagen/issues/135
-        # It's a workaround for nested column handling in dbldatagen.
-        .withColumnSpec(
-            "alleleFrequencies",
-            expr='array(named_struct("alleleFrequency", rand(), "populationName", cast(rand() as string)))',
-            percentNulls=0.1,
-        )
-        .withColumnSpec("rsIds", expr="array(cast(rand() AS string))", percentNulls=0.1)
-        .withColumnSpec(
-            "vep",
-            expr='named_struct("mostSevereConsequence", cast(rand() as string), "transcriptConsequences", array(named_struct("aminoAcids", cast(rand() as string), "consequenceTerms", array(cast(rand() as string)), "geneId", cast(rand() as string), "lof", cast(rand() as string))))',
-            percentNulls=0.1,
-        )
-        .withColumnSpec(
-            "inSilicoPredictors",
-            expr='named_struct("cadd", named_struct("phred", cast(rand() as float), "raw_score", cast(rand() as float)), "revelMax", cast(rand() as double), "spliceaiDsMax", cast(rand() as float), "pangolinLargestDs", cast(rand() as double), "phylop", cast(rand() as double), "polyphenMax", cast(rand() as double), "siftMax", cast(rand() as double))',
-            percentNulls=0.1,
-        )
-    )
-    return VariantAnnotation(_df=data_spec.build(), _schema=va_schema)
-
-
-@pytest.fixture()
 def mock_variant_index(spark: SparkSession) -> VariantIndex:
     """Mock variant index."""
     vi_schema = VariantIndex.get_schema()
@@ -320,23 +262,73 @@ def mock_variant_index(spark: SparkSession) -> VariantIndex:
             randomSeedMethod="hash_fieldname",
         )
         .withSchema(vi_schema)
-        .withColumnSpec("chromosomeB37", percentNulls=0.1)
-        .withColumnSpec("positionB37", percentNulls=0.1)
-        .withColumnSpec("mostSevereConsequence", percentNulls=0.1)
+        .withColumnSpec("mostSevereConsequenceId", percentNulls=0.1)
         # Nested column handling workaround
         # https://github.com/databrickslabs/dbldatagen/issues/135
         # It's a workaround for nested column handling in dbldatagen.
+        .withColumnSpec(
+            "inSilicoPredictors",
+            expr="""
+                array(
+                    named_struct(
+                        "method", cast(rand() as string),
+                        "assessment", cast(rand() as string),
+                        "score", rand(),
+                        "assessmentFlag", cast(rand() as string),
+                        "targetId", cast(rand() as string),
+                        "normalizedScore", cast(rand() as float)
+                    )
+                )
+            """,
+            percentNulls=0.1,
+        )
         .withColumnSpec(
             "alleleFrequencies",
             expr='array(named_struct("alleleFrequency", rand(), "populationName", cast(rand() as string)))',
             percentNulls=0.1,
         )
+        .withColumnSpec("rsIds", expr="array(cast(rand() AS string))", percentNulls=0.1)
         .withColumnSpec(
-            "inSilicoPredictors",
-            expr='named_struct("cadd", named_struct("phred", cast(rand() as float), "raw_score", cast(rand() as float)), "revelMax", cast(rand() as double), "spliceaiDsMax", cast(rand() as float), "pangolinLargestDs", cast(rand() as double), "phylop", cast(rand() as double), "polyphenMax", cast(rand() as double), "siftMax", cast(rand() as double))',
+            "transcriptConsequences",
+            expr="""
+                array(
+                    named_struct(
+                        "variantFunctionalConsequenceIds", array(cast(rand() as string)),
+                        "aminoAcidChange", cast(rand() as string),
+                        "uniprotAccessions", array(cast(rand() as string)),
+                        "isEnsemblCanonical", cast(rand() as boolean),
+                        "codons", cast(rand() as string),
+                        "distanceFromTss", cast(rand() as long),
+                        "distanceFromFootprint", cast(rand() as long),
+                        "appris", cast(rand() as string),
+                        "maneSelect", cast(rand() as string),
+                        "targetId", cast(rand() as string),
+                        "impact", cast(rand() as string),
+                        "lofteePrediction", cast(rand() as string),
+                        "siftPrediction", rand(),
+                        "polyphenPrediction", rand(),
+                        "consequenceScore", cast(rand() as float),
+                        "transcriptIndex", cast(rand() as integer),
+                        "transcriptId", cast(rand() as string),
+                        "biotype", cast(rand() as string),
+                        "approvedSymbol", cast(rand() as string)
+                    )
+                )
+            """,
             percentNulls=0.1,
         )
-        .withColumnSpec("rsIds", expr="array(cast(rand() AS string))", percentNulls=0.1)
+        .withColumnSpec(
+            "dbXrefs",
+            expr="""
+                array(
+                    named_struct(
+                        "id", cast(rand() as string),
+                        "source", cast(rand() as string)
+                    )
+                )
+            """,
+            percentNulls=0.1,
+        )
     )
 
     return VariantIndex(_df=data_spec.build(), _schema=vi_schema)
@@ -370,9 +362,9 @@ def mock_summary_statistics_data(spark: SparkSession) -> DataFrame:
         # Allowing missingness:
         .withColumnSpec("standardError", percentNulls=0.1)
         # Making sure p-values are below 1:
-    ).build()
+    )
 
-    return data_spec
+    return data_spec.build()
 
 
 @pytest.fixture()
@@ -411,7 +403,7 @@ def mock_ld_index(spark: SparkSession) -> LDIndex:
 def sample_gwas_catalog_studies(spark: SparkSession) -> DataFrame:
     """Sample GWAS Catalog studies."""
     return spark.read.csv(
-        "tests/gentropy/data_samples/gwas_catalog_studies_sample-r2022-11-29.tsv",
+        "tests/gentropy/data_samples/gwas_catalog_studies.tsv",
         sep="\t",
         header=True,
     )
@@ -421,7 +413,7 @@ def sample_gwas_catalog_studies(spark: SparkSession) -> DataFrame:
 def sample_gwas_catalog_ancestries_lut(spark: SparkSession) -> DataFrame:
     """Sample GWAS ancestries sample data."""
     return spark.read.csv(
-        "tests/gentropy/data_samples/gwas_catalog_ancestries_sample_v1.0.3-r2022-11-29.tsv",
+        "tests/gentropy/data_samples/gwas_catalog_ancestries.tsv",
         sep="\t",
         header=True,
     )
@@ -441,7 +433,7 @@ def sample_gwas_catalog_harmonised_sumstats_list(spark: SparkSession) -> DataFra
 def sample_gwas_catalog_associations(spark: SparkSession) -> DataFrame:
     """Sample GWAS raw associations sample data."""
     return spark.read.csv(
-        "tests/gentropy/data_samples/gwas_catalog_associations_sample_e107_r2022-11-29.tsv",
+        "tests/gentropy/data_samples/gwas_catalog_associations.tsv",
         sep="\t",
         header=True,
     )
@@ -470,28 +462,30 @@ def sample_finngen_studies(spark: SparkSession) -> DataFrame:
 
 
 @pytest.fixture()
-def sample_eqtl_catalogue_studies(spark: SparkSession) -> DataFrame:
-    """Sample eQTL Catalogue studies."""
-    # For reference, the sample file was generated with the following command:
-    # curl https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv | head -n11 > tests/gentropy/data_samples/eqtl_catalogue_studies_sample.tsv
-    with open(
-        "tests/gentropy/data_samples/eqtl_catalogue_studies_sample.tsv"
-    ) as eqtl_catalogue:
-        tsv = eqtl_catalogue.read()
-        rdd = spark.sparkContext.parallelize([tsv])
-        return spark.read.csv(rdd, sep="\t", header=True)
+def sample_eqtl_catalogue_finemapping_credible_sets(session: Session) -> DataFrame:
+    """Sample raw eQTL Catalogue credible sets outputted by SuSIE."""
+    return EqtlCatalogueFinemapping.read_credible_set_from_source(
+        session,
+        credible_set_path=["tests/gentropy/data_samples/QTD000584.credible_sets.tsv"],
+    )
 
 
 @pytest.fixture()
-def sample_eqtl_catalogue_summary_stats(spark: SparkSession) -> DataFrame:
-    """Sample eQTL Catalogue summary stats."""
-    # For reference, the sample file was generated with the following commands:
-    # mkdir -p tests/gentropy/data_samples/imported/GTEx_V8/ge
-    # curl ftp://ftp.ebi.ac.uk/pub/databases/spot/eQTL/imported/GTEx_V8/ge/Adipose_Subcutaneous.tsv.gz | gzip -cd | head -n11 | gzip -c > tests/gentropy/data_samples/imported/GTEx_V8/ge/Adipose_Subcutaneous.tsv.gz
-    # It's important for the test file to be named in exactly this way, because eQTL Catalogue study ID is populated based on input file name.
+def sample_eqtl_catalogue_finemapping_lbf(session: Session) -> DataFrame:
+    """Sample raw eQTL Catalogue table with logBayesFactors outputted by SuSIE."""
+    return EqtlCatalogueFinemapping.read_lbf_from_source(
+        session,
+        lbf_path=["tests/gentropy/data_samples/QTD000584.lbf_variable.txt"],
+    )
+
+
+@pytest.fixture()
+def sample_eqtl_catalogue_studies_metadata(spark: SparkSession) -> DataFrame:
+    """Sample raw eQTL Catalogue table with metadata about the QTD000584 study."""
     return spark.read.option("delimiter", "\t").csv(
-        "tests/gentropy/data_samples/imported/GTEx_V8/ge/Adipose_Subcutaneous.tsv.gz",
+        "tests/gentropy/data_samples/sample_eqtl_catalogue_studies.tsv",
         header=True,
+        schema=EqtlCatalogueStudyIndex.raw_studies_metadata_schema,
     )
 
 
@@ -504,6 +498,15 @@ def sample_ukbiobank_studies(spark: SparkSession) -> DataFrame:
         sep="\t",
         header=True,
         inferSchema=True,
+    )
+
+
+@pytest.fixture()
+def study_locus_sample_for_colocalisation(spark: SparkSession) -> DataFrame:
+    """Sample study locus data for colocalisation."""
+    return StudyLocus(
+        _df=spark.read.parquet("tests/gentropy/data_samples/coloc_test.parquet"),
+        _schema=StudyLocus.get_schema(),
     )
 
 
@@ -541,6 +544,35 @@ def mock_gene_index(spark: SparkSession) -> GeneIndex:
 
 
 @pytest.fixture()
+def mock_biosample_index(spark: SparkSession) -> BiosampleIndex:
+    """Mock biosample index dataset."""
+    bi_schema = BiosampleIndex.get_schema()
+
+    # Makes arrays of varying length with random integers between 1 and 100
+    array_expression = "transform(sequence(1, 1 + floor(rand() * 9)), x -> cast((rand() * 100) as int))"
+
+    data_spec = (
+        dg.DataGenerator(
+            spark,
+            rows=400,
+            partitions=4,
+            randomSeedMethod="hash_fieldname",
+        )
+        .withSchema(bi_schema)
+        .withColumnSpec("biosampleName", percentNulls=0.1)
+        .withColumnSpec("description", percentNulls=0.1)
+        .withColumnSpec("xrefs", expr=array_expression, percentNulls=0.1)
+        .withColumnSpec("synonyms", expr=array_expression, percentNulls=0.1)
+        .withColumnSpec("parents", expr=array_expression, percentNulls=0.1)
+        .withColumnSpec("ancestors", expr=array_expression, percentNulls=0.1)
+        .withColumnSpec("descendants", expr=array_expression, percentNulls=0.1)
+        .withColumnSpec("children", expr=array_expression, percentNulls=0.1)
+    )
+
+    return BiosampleIndex(_df=data_spec.build(), _schema=bi_schema)
+
+
+@pytest.fixture()
 def liftover_chain_37_to_38(spark: SparkSession) -> LiftOverSpark:
     """Sample liftover chain file."""
     return LiftOverSpark("tests/gentropy/data_samples/grch37_to_grch38.over.chain")
@@ -565,36 +597,16 @@ def sample_otp_interactions(spark: SparkSession) -> DataFrame:
 @pytest.fixture()
 def mock_l2g_feature_matrix(spark: SparkSession) -> L2GFeatureMatrix:
     """Mock l2g feature matrix dataset."""
-    schema = L2GFeatureMatrix.get_schema()
-
-    data_spec = (
-        dg.DataGenerator(
-            spark,
-            rows=50,
-            partitions=4,
-            randomSeedMethod="hash_fieldname",
-        )
-        .withSchema(schema)
-        .withColumnSpec("distanceTssMean", percentNulls=0.1)
-        .withColumnSpec("distanceTssMinimum", percentNulls=0.1)
-        .withColumnSpec("eqtlColocClppMaximum", percentNulls=0.1)
-        .withColumnSpec("eqtlColocClppMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec("eqtlColocLlrMaximum", percentNulls=0.1)
-        .withColumnSpec("eqtlColocLlrMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec("pqtlColocClppMaximum", percentNulls=0.1)
-        .withColumnSpec("pqtlColocClppMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec("pqtlColocLlrMaximum", percentNulls=0.1)
-        .withColumnSpec("pqtlColocLlrMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec("sqtlColocClppMaximum", percentNulls=0.1)
-        .withColumnSpec("sqtlColocClppMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec("sqtlColocLlrMaximum", percentNulls=0.1)
-        .withColumnSpec("sqtlColocLlrMaximumNeighborhood", percentNulls=0.1)
-        .withColumnSpec(
-            "goldStandardSet", percentNulls=0.0, values=["positive", "negative"]
-        )
+    return L2GFeatureMatrix(
+        _df=spark.createDataFrame(
+            [
+                ("1", "gene1", 100.0, None, True),
+                ("2", "gene2", 1000.0, 0.0, False),
+            ],
+            "studyLocusId STRING, geneId STRING, distanceTssMean FLOAT, distanceSentinelTssMinimum FLOAT, goldStandardSet BOOLEAN",
+        ),
+        with_gold_standard=True,
     )
-
-    return L2GFeatureMatrix(_df=data_spec.build(), _schema=schema)
 
 
 @pytest.fixture()

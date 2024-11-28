@@ -1,44 +1,133 @@
 """Step to generate variant index dataset."""
+
 from __future__ import annotations
 
+import math
+from functools import reduce
+
+from pyspark.sql import functions as f
+
 from gentropy.common.session import Session
-from gentropy.dataset.study_locus import StudyLocus
-from gentropy.dataset.variant_annotation import VariantAnnotation
 from gentropy.dataset.variant_index import VariantIndex
+from gentropy.datasource.ensembl.vep_parser import VariantEffectPredictorParser
+from gentropy.datasource.open_targets.variants import OpenTargetsVariant
 
 
 class VariantIndexStep:
-    """Run variant index step to only variants in study-locus sets.
+    """Generate variant index based on a VEP output in json format.
 
-    Using a `VariantAnnotation` dataset as a reference, this step creates and writes a dataset of the type `VariantIndex` that includes only variants that have disease-association data with a reduced set of annotations.
+    The variant index is a dataset that contains variant annotations extracted from VEP output. It is expected that all variants in the VEP output are present in the variant index.
+    There's an option to provide extra variant annotations to be added to the variant index eg. allele frequencies from GnomAD.
     """
 
     def __init__(
         self: VariantIndexStep,
         session: Session,
-        variant_annotation_path: str,
-        credible_set_path: str,
+        vep_output_json_path: str,
         variant_index_path: str,
+        hash_threshold: int,
+        gnomad_variant_annotations_path: str | None = None,
     ) -> None:
         """Run VariantIndex step.
 
         Args:
             session (Session): Session object.
-            variant_annotation_path (str): Variant annotation dataset path.
-            credible_set_path (str): Credible set dataset path.
-            variant_index_path (str): Variant index dataset path.
+            vep_output_json_path (str): Variant effect predictor output path (in json format).
+            variant_index_path (str): Variant index dataset path to save resulting data.
+            hash_threshold (int): Hash threshold for variant identifier length.
+            gnomad_variant_annotations_path (str | None): Path to extra variant annotation dataset.
         """
-        # Extract
-        va = VariantAnnotation.from_parquet(session, variant_annotation_path)
-        credible_set = StudyLocus.from_parquet(
-            session, credible_set_path, recursiveFileLookup=True
+        # Extract variant annotations from VEP output:
+        variant_index = VariantEffectPredictorParser.extract_variant_index_from_vep(
+            session.spark, vep_output_json_path, hash_threshold
         )
 
-        # Transform
-        vi = VariantIndex.from_variant_annotation(va, credible_set)
+        # Process variant annotations if provided:
+        if gnomad_variant_annotations_path:
+            # Read variant annotations from parquet:
+            annotations = VariantIndex.from_parquet(
+                session=session,
+                path=gnomad_variant_annotations_path,
+                recursiveFileLookup=True,
+                id_threshold=hash_threshold,
+            )
+
+            # Update file with extra annotations:
+            variant_index = variant_index.add_annotation(annotations)
 
         (
-            vi.df.write.partitionBy("chromosome")
-            .mode(session.write_mode)
+            variant_index.df.repartitionByRange(
+                session.output_partitions, "chromosome", "position"
+            )
+            .sortWithinPartitions("chromosome", "position")
+            .write.mode(session.write_mode)
             .parquet(variant_index_path)
         )
+
+
+class ConvertToVcfStep:
+    """Convert dataset with variant annotation to VCF step.
+
+    This step converts in-house data source formats to VCF like format.
+
+    NOTE! Due to the csv DataSourceWriter limitations we can not save the column name
+    `#CHROM` as in vcf file. The column is replaced with `CHROM`.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        source_paths: list[str],
+        source_formats: list[str],
+        output_path: str,
+        partition_size: int,
+    ) -> None:
+        """Initialize step.
+
+        Args:
+            session (Session): Session object.
+            source_paths (list[str]): Input dataset path.
+            source_formats (list[str]): Format of the input dataset.
+            output_path (str): Output VCF file path.
+            partition_size (int): Approximate number of variants in each output partition.
+        """
+        assert len(source_formats) == len(
+            source_paths
+        ), "Must provide format for each source path."
+
+        # Load
+        raw_variants = [
+            session.load_data(p, f)
+            for p, f in zip(source_paths, source_formats, strict=True)
+        ]
+
+        # Extract
+        processed_variants = [
+            OpenTargetsVariant.as_vcf_df(session, df) for df in raw_variants
+        ]
+
+        # Merge
+        merged_variants = reduce(
+            lambda x, y: x.unionByName(y), processed_variants
+        ).drop_duplicates(["#CHROM", "POS", "REF", "ALT"])
+
+        variant_count = merged_variants.count()
+        n_partitions = int(math.ceil(variant_count / partition_size))
+        partitioned_variants = (
+            merged_variants.repartitionByRange(
+                n_partitions, f.col("#CHROM"), f.col("POS")
+            )
+            .sortWithinPartitions(f.col("#CHROM").asc(), f.col("POS").asc())
+            # Due to the large number of partitions ensure we do not lose the partitions before saving them
+            .persist()
+            # FIXME the #CHROM column is saved as "#CHROM" by pyspark which fails under VEP,
+            # The native solution would be to implement the datasource with proper writer
+            # see https://docs.databricks.com/en/pyspark/datasources.html.
+            # Proposed solution will require adding # at the start of the first line of
+            # vcf before processing it in orchestration.
+            .withColumnRenamed("#CHROM", "CHROM")
+        )
+        # Write
+        partitioned_variants.write.mode(session.write_mode).option("sep", "\t").option(
+            "quote", ""
+        ).option("quoteAll", False).option("header", True).csv(output_path)

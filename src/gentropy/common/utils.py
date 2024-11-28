@@ -1,11 +1,13 @@
 """Common functions in the Genetics datasets."""
+
 from __future__ import annotations
 
 import sys
 from math import floor, log10
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 import hail as hl
+import numpy as np
 from pyspark.sql import functions as f
 from pyspark.sql import types as t
 
@@ -13,47 +15,8 @@ from gentropy.common.spark_helpers import pvalue_to_zscore
 
 if TYPE_CHECKING:
     from hail.table import Table
+    from numpy.typing import NDArray
     from pyspark.sql import Column
-
-
-def parse_region(region: str) -> Tuple[str, int, int]:
-    """Parse region string to chr:start-end.
-
-    Args:
-        region (str): Genomic region expected to follow chr##:#,###-#,### format or ##:####-#####.
-
-    Returns:
-        Tuple[str, int, int]: Chromosome, start position, end position
-
-    Raises:
-        ValueError: If the end and start positions cannot be casted to integer or not all three values value error is raised.
-
-    Examples:
-        >>> parse_region('chr6:28,510,120-33,480,577')
-        ('6', 28510120, 33480577)
-        >>> parse_region('6:28510120-33480577')
-        ('6', 28510120, 33480577)
-        >>> parse_region('6:28510120')
-        Traceback (most recent call last):
-            ...
-        ValueError: Genomic region should follow a ##:####-#### format.
-        >>> parse_region('6:28510120-foo')
-        Traceback (most recent call last):
-            ...
-        ValueError: Start and the end position of the region has to be integer.
-    """
-    region = region.replace(":", "-").replace(",", "")
-    try:
-        (chromosome, start_position, end_position) = region.split("-")
-    except ValueError as err:
-        raise ValueError("Genomic region should follow a ##:####-#### format.") from err
-
-    try:
-        return (chromosome.replace("chr", ""), int(start_position), int(end_position))
-    except ValueError as err:
-        raise ValueError(
-            "Start and the end position of the region has to be integer."
-        ) from err
 
 
 def calculate_confidence_interval(
@@ -206,41 +169,6 @@ def parse_pvalue(pv: Column) -> list[Column]:
     ]
 
 
-def convert_gnomad_position_to_ensembl(
-    position: Column, reference: Column, alternate: Column
-) -> Column:
-    """Convert GnomAD variant position to Ensembl variant position.
-
-    For indels (the reference or alternate allele is longer than 1), then adding 1 to the position, for SNPs,
-    the position is unchanged. More info about the problem: https://www.biostars.org/p/84686/
-
-    Args:
-        position (Column): Position of the variant in GnomAD's coordinates system.
-        reference (Column): The reference allele in GnomAD's coordinates system.
-        alternate (Column): The alternate allele in GnomAD's coordinates system.
-
-    Returns:
-        Column: The position of the variant in the Ensembl genome.
-
-    Examples:
-        >>> d = [(1, "A", "C"), (2, "AA", "C"), (3, "A", "AA")]
-        >>> df = spark.createDataFrame(d).toDF("position", "reference", "alternate")
-        >>> df.withColumn("new_position", convert_gnomad_position_to_ensembl(f.col("position"), f.col("reference"), f.col("alternate"))).show()
-        +--------+---------+---------+------------+
-        |position|reference|alternate|new_position|
-        +--------+---------+---------+------------+
-        |       1|        A|        C|           1|
-        |       2|       AA|        C|           3|
-        |       3|        A|       AA|           4|
-        +--------+---------+---------+------------+
-        <BLANKLINE>
-
-    """
-    return f.when(
-        (f.length(reference) > 1) | (f.length(alternate) > 1), position + 1
-    ).otherwise(position)
-
-
 def _liftover_loci(
     variant_index: Table, chain_path: str, dest_reference_genome: str
 ) -> Table:
@@ -325,3 +253,121 @@ def parse_efos(efo_uri: Column) -> Column:
     """
     colname = efo_uri._jc.toString()
     return f.array_sort(f.expr(f"regexp_extract_all(`{colname}`, '([A-Z]+_[0-9]+)')"))
+
+
+def get_logsum(arr: NDArray[np.float64]) -> float:
+    """Calculates logarithm of the sum of exponentials of a vector. The max is extracted to ensure that the sum is not Inf.
+
+    This function emulates scipy's logsumexp expression.
+
+    Args:
+        arr (NDArray[np.float64]): input array
+
+    Returns:
+        float: logsumexp of the input array
+
+    Example:
+        >>> l = [0.2, 0.1, 0.05, 0]
+        >>> round(get_logsum(l), 6)
+        1.476557
+    """
+    themax = np.max(arr)
+    result = themax + np.log(np.sum(np.exp(arr - themax)))
+    return float(result)
+
+
+def access_gcp_secret(secret_id: str, project_id: str) -> str:
+    """Access GCP secret manager to get the secret value.
+
+    Args:
+        secret_id (str): ID of the secret
+        project_id (str): ID of the GCP project
+
+    Returns:
+        str: secret value
+    """
+    from google.cloud import secretmanager
+
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+    response = client.access_secret_version(name=name)
+    return response.payload.data.decode("UTF-8")
+
+
+def copy_to_gcs(source_path: str, destination_blob: str) -> None:
+    """Copy a file to a Google Cloud Storage bucket.
+
+    Args:
+        source_path (str): Path to the local file to copy
+        destination_blob (str): GS path to the destination blob in the GCS bucket
+
+    Raises:
+        ValueError: If the path is a directory
+    """
+    import os
+    from urllib.parse import urlparse
+
+    from google.cloud import storage
+
+    if os.path.isdir(source_path):
+        raise ValueError("Path should be a file, not a directory.")
+    client = storage.Client()
+    bucket = client.bucket(bucket_name=urlparse(destination_blob).hostname)
+    blob = bucket.blob(blob_name=urlparse(destination_blob).path.lstrip("/"))
+    blob.upload_from_filename(source_path)
+
+
+def extract_chromosome(variant_id: Column) -> Column:
+    """Extract chromosome from variant ID.
+
+    This function extracts the chromosome from a variant ID. The variantId is expected to be in the format `chromosome_position_ref_alt`.
+    The function does not convert the GENCODE to Ensembl chromosome notation.
+    See https://genome.ucsc.edu/FAQ/FAQgenes.html#:~:text=maps%20only%20once.-,The%20differences,-Some%20of%20our
+
+    Args:
+        variant_id (Column): Variant ID
+
+    Returns:
+        Column: Chromosome
+
+    Examples:
+        >>> d = [("chr1_12345_A_T",),("15_KI270850v1_alt_48777_C_T",),]
+        >>> df = spark.createDataFrame(d).toDF("variantId")
+        >>> df.withColumn("chromosome", extract_chromosome(f.col("variantId"))).show(truncate=False)
+        +---------------------------+-----------------+
+        |variantId                  |chromosome       |
+        +---------------------------+-----------------+
+        |chr1_12345_A_T             |chr1             |
+        |15_KI270850v1_alt_48777_C_T|15_KI270850v1_alt|
+        +---------------------------+-----------------+
+        <BLANKLINE>
+
+    """
+    return f.regexp_extract(variant_id, r"^(.*)_\d+_.*$", 1)
+
+
+def extract_position(variant_id: Column) -> Column:
+    """Extract position from variant ID.
+
+    This function extracts the position from a variant ID. The variantId is expected to be in the format `chromosome_position_ref_alt`.
+
+    Args:
+        variant_id (Column): Variant ID
+
+    Returns:
+        Column: Position
+
+    Examples:
+        >>> d = [("chr1_12345_A_T",),("15_KI270850v1_alt_48777_C_T",),]
+        >>> df = spark.createDataFrame(d).toDF("variantId")
+        >>> df.withColumn("position", extract_position(f.col("variantId"))).show(truncate=False)
+        +---------------------------+--------+
+        |variantId                  |position|
+        +---------------------------+--------+
+        |chr1_12345_A_T             |12345   |
+        |15_KI270850v1_alt_48777_C_T|48777   |
+        +---------------------------+--------+
+        <BLANKLINE>
+
+    """
+    return f.regexp_extract(variant_id, r"^.*_(\d+)_.*$", 1)

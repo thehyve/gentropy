@@ -1,4 +1,5 @@
-"""Tests GWAS Catalog study splitter."""
+"""Tests Gentropy session."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

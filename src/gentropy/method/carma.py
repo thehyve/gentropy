@@ -1,6 +1,9 @@
 """CARMA outlier detection method."""
+
 from __future__ import annotations
 
+import concurrent.futures
+import warnings
 from itertools import combinations
 from math import floor, lgamma
 from typing import Any
@@ -13,6 +16,42 @@ from scipy.optimize import minimize_scalar
 
 class CARMA:
     """Implementation of CARMA outlier detection method."""
+
+    @staticmethod
+    def time_limited_CARMA_spike_slab_noEM(
+        z: np.ndarray,
+        ld: np.ndarray,
+        sec_threshold: float = 600,
+        tau: float = 0.04,
+    ) -> dict[str, Any]:
+        """The wrapper for the CARMA_spike_slab_noEM function that runs the function in a separate thread and terminates it if it takes too long.
+
+        Args:
+            z (np.ndarray): Numeric vector representing z-scores.
+            ld (np.ndarray): Numeric matrix representing the linkage disequilibrium (LD) matrix.
+            sec_threshold (float): The time threshold in seconds.
+            tau (float): Tuning parameter controlling the level of shrinkage of the LD matrix
+
+        Returns:
+            dict[str, Any]: A dictionary containing the following results:
+                - PIPs: A numeric vector of posterior inclusion probabilities (PIPs) for all SNPs or None.
+                - B_list: A dataframe containing the marginal likelihoods and the corresponding model space or None.
+                - Outliers: A list of outlier SNPs or None.
+        """
+        # Ignore pandas future warnings
+        warnings.simplefilter(action="ignore", category=FutureWarning)
+        try:
+            # Execute CARMA.CARMA_spike_slab_noEM with a timeout
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    CARMA.CARMA_spike_slab_noEM, z=z, ld=ld, tau=tau
+                )
+                result = future.result(timeout=sec_threshold)
+        except concurrent.futures.TimeoutError:
+            # If execution exceeds the timeout, return None
+            result = {"PIPs": None, "B_list": None, "Outliers": None}
+
+        return result
 
     @staticmethod
     def CARMA_spike_slab_noEM(
@@ -39,7 +78,7 @@ class CARMA:
             all_inner_iter (int): The number of inner iterations in each CARMA iteration.
             epsilon_threshold (float): Threshold for convergence in CARMA iterations.
             num_causal (int): Maximal number of causal variants to be selected in the final model.
-            tau (float): Tuning parameter controlling the degree of sparsity in the Spike-and-Slab prior.
+            tau (float): Tuning parameter controlling the level of shrinkage of the LD matrix.
             outlier_switch (bool): Whether to consider outlier detection in the analysis.
             outlier_BF_index (float): Bayes Factor threshold for identifying outliers.
 
@@ -104,7 +143,6 @@ class CARMA:
             "B_list": all_C_list["B_list"],
             "Outliers": all_C_list["conditional_S_list"],
         }
-
 
         return results_list
 
@@ -573,7 +611,7 @@ class CARMA:
             num_causal (int): Maximal number of causal variants to be selected in the final model.
             outlier_switch (bool): Whether to consider outlier detection in the analysis.
             input_conditional_S_list (list[int] | None): The conditional set. Defaults to None.
-            tau (float): Tuning parameter controlling the degree of sparsity in the Spike-and-Slab prior.
+            tau (float): Tuning parameter controlling the level of shrinkage of the LD matrix.
             epsilon (float): Threshold for convergence in CARMA iterations.
             inner_all_iter (int): The number of inner iterations in each CARMA iteration.
             outlier_BF_index (float | None): Bayes Factor threshold for identifying outliers. Defaults to None.
@@ -826,9 +864,19 @@ class CARMA:
                         sec_sample = np.random.choice(
                             range(0, 3), 1, p=np.exp(aa) / np.sum(np.exp(aa))
                         )
-                        S = set_gamma[sec_sample[0]][
-                            int(set_star["gamma_set_index"][sec_sample[0]])
-                        ].tolist()
+                        if set_gamma[sec_sample[0]] is not None:
+                            S = set_gamma[sec_sample[0]][
+                                int(set_star["gamma_set_index"][sec_sample[0]])
+                            ].tolist()
+                        else:
+                            sec_sample = np.random.choice(
+                                range(1, 3),
+                                1,
+                                p=np.exp(aa)[[1, 2]] / np.sum(np.exp(aa)[[1, 2]]),
+                            )
+                            S = set_gamma[sec_sample[0]][
+                                int(set_star["gamma_set_index"][sec_sample[0]])
+                            ].tolist()
 
                 for item in conditional_S:
                     if item not in S:
