@@ -278,7 +278,7 @@ class LocusToGeneStep:
             self.feature_matrix,
             self.features_list,
             model_path=self.model_path,
-            hf_token=access_gcp_secret("hfhub-key", "open-targets-genetics-dev"),
+            hf_token=access_gcp_secret("hfhub-key", "open-targets-genetics-dev") if self.download_from_hub else None,
             download_from_hub=self.download_from_hub,
         )
         predictions.filter(
