@@ -103,7 +103,7 @@ class LocusToGeneStep:
         run_mode: str,
         features_list: list[str],
         download_from_hub: bool,
-        wandb_run_name: str,
+        wandb_run_name: str | None = None,
         credible_set_path: str,
         feature_matrix_path: str,
         model_path: str | None = None,
@@ -291,8 +291,9 @@ class LocusToGeneStep:
     def run_train(self) -> None:
         """Run the training step."""
         # Initialize access to weights and biases
-        wandb_key = access_gcp_secret("wandb-key", "open-targets-genetics-dev")
-        wandb_login(key=wandb_key)
+        if self.wandb_run_name is not None:
+            wandb_key = access_gcp_secret("wandb-key", "open-targets-genetics-dev")
+            wandb_login(key=wandb_key)
 
         # Instantiate classifier and train model
         l2g_model = LocusToGeneModel(

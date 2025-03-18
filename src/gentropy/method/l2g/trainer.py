@@ -160,6 +160,7 @@ class LocusToGeneTrainer:
             and self.y_train is not None
             and self.y_test is not None
             and self.features_list is not None
+            and wandb_run_name is not None
         ):
             assert (
                 not self.x_train.empty and not self.y_train.empty
@@ -246,11 +247,12 @@ class LocusToGeneTrainer:
             wandb_termlog("Logged Shapley contributions.")
             self.run.finish()
         else:
-            raise ValueError("Something went wrong, couldn't log to W&B.")
+            if wandb_run_name is not None:
+                raise ValueError("Something went wrong, couldn't log to W&B.")
 
     def train(
         self: LocusToGeneTrainer,
-        wandb_run_name: str,
+        wandb_run_name: str | None = None,
     ) -> LocusToGeneModel:
         """Train the Locus to Gene model.
 
@@ -277,9 +279,10 @@ class LocusToGeneTrainer:
         model = self.fit()
 
         # Evaluate
-        self.log_to_wandb(
-            wandb_run_name=wandb_run_name,
-        )
+        if wandb_run_name is not None:
+            self.log_to_wandb(
+                wandb_run_name=wandb_run_name,
+            )
 
         return model
 
