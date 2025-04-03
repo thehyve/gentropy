@@ -3,7 +3,7 @@
   "fields": [
     {
       "name": "studyLocusId",
-      "type": "long",
+      "type": "string",
       "nullable": false,
       "metadata": {}
     },
@@ -17,6 +17,44 @@
       "name": "score",
       "type": "double",
       "nullable": false,
+      "metadata": {}
+    },
+    {
+      "metadata": {},
+      "name": "features",
+      "nullable": true,
+      "type": {
+        "containsNull": false,
+        "elementType": {
+          "fields": [
+            {
+              "metadata": {},
+              "name": "name",
+              "nullable": false,
+              "type": "string"
+            },
+            {
+              "metadata": {},
+              "name": "value",
+              "nullable": false,
+              "type": "float"
+            },
+            {
+              "metadata": {},
+              "name": "shapValue",
+              "nullable": true,
+              "type": "float"
+            }
+          ],
+          "type": "struct"
+        },
+        "type": "array"
+      }
+    },
+    {
+      "name": "shapBaseValue",
+      "type": "float",
+      "nullable": true,
       "metadata": {}
     }
   ]

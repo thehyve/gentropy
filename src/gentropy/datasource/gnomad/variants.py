@@ -1,68 +1,46 @@
 """Import gnomAD variants dataset."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import hail as hl
+import pyspark.sql.functions as f
+import pyspark.sql.types as t
 
-from gentropy.dataset.variant_annotation import VariantAnnotation
+from gentropy.common.types import VariantPopulation
+from gentropy.config import GnomadVariantConfig, VariantIndexConfig
+from gentropy.dataset.variant_index import VariantIndex
 
 if TYPE_CHECKING:
-    from hail.expr.expressions import Int32Expression, StringExpression
+    pass
 
 
-@dataclass
 class GnomADVariants:
-    """GnomAD variants included in the GnomAD genomes dataset.
+    """GnomAD variants included in the GnomAD genomes dataset."""
 
-    Attributes:
-        gnomad_genomes (str): Path to gnomAD genomes hail table. Defaults to gnomAD's 4.0 release.
-        chain_hail_38_37 (str): Path to GRCh38 to GRCh37 chain file. Defaults to Hail's chain file.
-        populations (list[str]): List of populations to include. Defaults to all populations.
-    """
-
-    gnomad_genomes: str = "gs://gcp-public-data--gnomad/release/4.0/ht/genomes/gnomad.genomes.v4.0.sites.ht/"
-    chain_hail_38_37: str = "gs://hail-common/references/grch38_to_grch37.over.chain.gz"
-    populations: list[str] = field(
-        default_factory=lambda: [
-            "afr",  # African-American
-            "amr",  # American Admixed/Latino
-            "ami",  # Amish ancestry
-            "asj",  # Ashkenazi Jewish
-            "eas",  # East Asian
-            "fin",  # Finnish
-            "nfe",  # Non-Finnish European
-            "mid",  # Middle Eastern
-            "sas",  # South Asian
-            "remaining",  # Other
-        ]
-    )
-
-    @staticmethod
-    def _convert_gnomad_position_to_ensembl_hail(
-        position: Int32Expression,
-        reference: StringExpression,
-        alternate: StringExpression,
-    ) -> Int32Expression:
-        """Convert GnomAD variant position to Ensembl variant position in hail table.
-
-        For indels (the reference or alternate allele is longer than 1), then adding 1 to the position, for SNPs, the position is unchanged.
-        More info about the problem: https://www.biostars.org/p/84686/
+    def __init__(
+        self,
+        gnomad_genomes_path: str = GnomadVariantConfig().gnomad_genomes_path,
+        gnomad_variant_populations: list[
+            VariantPopulation | str
+        ] = GnomadVariantConfig().gnomad_variant_populations,
+        hash_threshold: int = VariantIndexConfig().hash_threshold,
+    ):
+        """Initialize.
 
         Args:
-            position (Int32Expression): Position of the variant in the GnomAD genome.
-            reference (StringExpression): The reference allele.
-            alternate (StringExpression): The alternate allele
+            gnomad_genomes_path (str): Path to gnomAD genomes hail table.
+            gnomad_variant_populations (list[VariantPopulation | str]): List of populations to include.
+            hash_threshold (int): longer variant ids will be hashed.
 
-        Returns:
-            Int32Expression: The position of the variant according to Ensembl genome.
+        All defaults are stored in GnomadVariantConfig.
         """
-        return hl.if_else(
-            (reference.length() > 1) | (alternate.length() > 1), position + 1, position
-        )
+        self.gnomad_genomes_path = gnomad_genomes_path
+        self.gnomad_variant_populations = gnomad_variant_populations
+        self.lenght_threshold = hash_threshold
 
-    def as_variant_annotation(self: GnomADVariants) -> VariantAnnotation:
+    def as_variant_index(self: GnomADVariants) -> VariantIndex:
         """Generate variant annotation dataset from gnomAD.
 
         Some relevant modifications to the original dataset are:
@@ -72,28 +50,23 @@ class GnomADVariants:
         3. Field names are converted to camel case to follow the convention.
 
         Returns:
-            VariantAnnotation: Variant annotation dataset
+            VariantIndex: GnomaAD variants dataset.
         """
         # Load variants dataset
         ht = hl.read_table(
-            self.gnomad_genomes,
+            self.gnomad_genomes_path,
             _load_refs=False,
         )
 
-        # Liftover
-        grch37 = hl.get_reference("GRCh37")
-        grch38 = hl.get_reference("GRCh38")
-        grch38.add_liftover(self.chain_hail_38_37, grch37)
-
         # Drop non biallelic variants
         ht = ht.filter(ht.alleles.length() == 2)
-        # Liftover
-        ht = ht.annotate(locus_GRCh37=hl.liftover(ht.locus, "GRCh37"))
+
         # Select relevant fields and nested records to create class
-        return VariantAnnotation(
+        return VariantIndex(
             _df=(
                 ht.select(
-                    gnomadVariantId=hl.str("-").join(
+                    # Extract mandatory fields:
+                    variantId=hl.str("_").join(
                         [
                             ht.locus.contig.replace("chr", ""),
                             hl.str(ht.locus.position),
@@ -102,68 +75,54 @@ class GnomADVariants:
                         ]
                     ),
                     chromosome=ht.locus.contig.replace("chr", ""),
-                    position=GnomADVariants._convert_gnomad_position_to_ensembl_hail(
-                        ht.locus.position, ht.alleles[0], ht.alleles[1]
-                    ),
-                    variantId=hl.str("_").join(
-                        [
-                            ht.locus.contig.replace("chr", ""),
-                            hl.str(
-                                GnomADVariants._convert_gnomad_position_to_ensembl_hail(
-                                    ht.locus.position, ht.alleles[0], ht.alleles[1]
-                                )
-                            ),
-                            ht.alleles[0],
-                            ht.alleles[1],
-                        ]
-                    ),
-                    chromosomeB37=ht.locus_GRCh37.contig.replace("chr", ""),
-                    positionB37=ht.locus_GRCh37.position,
+                    position=ht.locus.position,
                     referenceAllele=ht.alleles[0],
                     alternateAllele=ht.alleles[1],
-                    rsIds=ht.rsid,
-                    alleleType=ht.allele_info.allele_type,
+                    # Extract allele frequencies from populations of interest:
                     alleleFrequencies=hl.set(
-                        [f"{pop}_adj" for pop in self.populations]
+                        [f"{pop}_adj" for pop in self.gnomad_variant_populations]
                     ).map(
                         lambda p: hl.struct(
                             populationName=p,
-                            alleleFrequency=ht.freq[ht.globals.freq_index_dict[p]].AF,
+                            alleleFrequency=ht.joint.freq[
+                                ht.joint_globals.freq_index_dict[p]
+                            ].AF,
                         )
                     ),
-                    vep=hl.struct(
-                        mostSevereConsequence=ht.vep.most_severe_consequence,
-                        transcriptConsequences=hl.map(
-                            lambda x: hl.struct(
-                                aminoAcids=x.amino_acids,
-                                consequenceTerms=x.consequence_terms,
-                                geneId=x.gene_id,
-                                lof=x.lof,
-                            ),
-                            # Only keeping canonical transcripts
-                            ht.vep.transcript_consequences.filter(
-                                lambda x: (x.canonical == 1)
-                                & (x.gene_symbol_source == "HGNC")
-                            ),
-                        ),
-                    ),
-                    inSilicoPredictors=hl.struct(
-                        cadd=hl.struct(
-                            phred=ht.in_silico_predictors.cadd.phred,
-                            raw=ht.in_silico_predictors.cadd.raw_score,
-                        ),
-                        revelMax=ht.in_silico_predictors.revel_max,
-                        spliceaiDsMax=ht.in_silico_predictors.spliceai_ds_max,
-                        pangolinLargestDs=ht.in_silico_predictors.pangolin_largest_ds,
-                        phylop=ht.in_silico_predictors.phylop,
-                        siftMax=ht.in_silico_predictors.sift_max,
-                        polyphenMax=ht.in_silico_predictors.polyphen_max,
+                    # Extract cross references to GnomAD:
+                    dbXrefs=hl.array(
+                        [
+                            hl.struct(
+                                id=hl.str("-").join(
+                                    [
+                                        ht.locus.contig.replace("chr", ""),
+                                        hl.str(ht.locus.position),
+                                        ht.alleles[0],
+                                        ht.alleles[1],
+                                    ]
+                                ),
+                                source=hl.str("gnomad"),
+                            )
+                        ]
                     ),
                 )
                 .key_by("chromosome", "position")
                 .drop("locus", "alleles")
                 .select_globals()
                 .to_spark(flatten=False)
+                .withColumns(
+                    {
+                        # Generate a variantId that is hashed for long variant ids:
+                        "variantId": VariantIndex.hash_long_variant_ids(
+                            f.col("variantId"),
+                            f.col("chromosome"),
+                            f.col("position"),
+                            self.lenght_threshold,
+                        ),
+                        # We are not capturing the most severe consequence from GnomAD, but this column needed for the schema:
+                        "mostSevereConsequenceId": f.lit(None).cast(t.StringType()),
+                    }
+                )
             ),
-            _schema=VariantAnnotation.get_schema(),
+            _schema=VariantIndex.get_schema(),
         )

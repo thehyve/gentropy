@@ -11,3 +11,8 @@ src/airflow/logs/*
 !src/airflow/logs/.gitkeep
 site/
 .env
+.coverage*
+wandb/
+hail*.log
+.python-version
+.idea

@@ -1,16 +1,18 @@
 """Tests on helper spark functions."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 import pyspark.sql.functions as f
 import pytest
+from pyspark.sql.types import ArrayType, DoubleType, StructField, StructType
+
 from gentropy.common.spark_helpers import (
     get_record_with_maximum_value,
     get_record_with_minimum_value,
     order_array_of_structs_by_field,
 )
-from pyspark.sql.types import ArrayType, DoubleType, StructField, StructType
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
@@ -37,9 +39,9 @@ def test_get_record_with_minimum_value_group_one_col(
     df = mock_variant_df.transform(
         lambda df: get_record_with_minimum_value(df, grouping_col, sorting_col)
     )
-    assert (
-        df.filter(f.col("chromosome") == 16).collect()[0].__getitem__("position")
-    ), 10116
+    assert df.filter(f.col("chromosome") == 16).collect()[0].__getitem__("position"), (
+        10116
+    )
 
 
 def test_get_record_with_maximum_value_group_two_cols(

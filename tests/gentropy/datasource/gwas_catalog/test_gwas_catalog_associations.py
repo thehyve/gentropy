@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from gentropy.dataset.variant_annotation import VariantAnnotation
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as f
+from pyspark.sql.types import StringType
+
+from gentropy.dataset.variant_index import VariantIndex
 from gentropy.datasource.gwas_catalog.associations import (
     GWASCatalogCuratedAssociationsParser,
     StudyLocusGWASCatalog,
 )
-from pyspark.sql import DataFrame
-from pyspark.sql import functions as f
-from pyspark.sql.types import LongType
 
 
 def test_study_locus_gwas_catalog_creation(
@@ -50,29 +51,38 @@ def test_qc_ambiguous_study(
 
 
 def test_study_locus_gwas_catalog_from_source(
-    mock_variant_annotation: VariantAnnotation,
+    mock_variant_index: VariantIndex,
     sample_gwas_catalog_associations: DataFrame,
 ) -> None:
     """Test study locus from gwas catalog mock data."""
     assert isinstance(
         GWASCatalogCuratedAssociationsParser.from_source(
-            sample_gwas_catalog_associations, mock_variant_annotation
+            sample_gwas_catalog_associations, mock_variant_index
         ),
         StudyLocusGWASCatalog,
     )
 
 
-def test__map_to_variant_annotation_variants(
+def test_map_variants_to_variant_index(
     sample_gwas_catalog_associations: DataFrame,
-    mock_variant_annotation: VariantAnnotation,
+    mock_variant_index: VariantIndex,
 ) -> None:
     """Test mapping to variant annotation variants."""
     assert isinstance(
-        GWASCatalogCuratedAssociationsParser._map_to_variant_annotation_variants(
+        GWASCatalogCuratedAssociationsParser._map_variants_to_gnomad_variants(
             sample_gwas_catalog_associations.withColumn(
-                "studyLocusId", f.monotonically_increasing_id().cast(LongType())
+                "rowId", f.monotonically_increasing_id().cast(StringType())
             ),
-            mock_variant_annotation,
+            mock_variant_index,
         ),
         DataFrame,
+    )
+
+
+def test_qc_flag_all_tophits(
+    mock_study_locus_gwas_catalog: StudyLocusGWASCatalog,
+) -> None:
+    """Test qc flag all top hits."""
+    assert isinstance(
+        mock_study_locus_gwas_catalog.qc_flag_all_tophits(), StudyLocusGWASCatalog
     )

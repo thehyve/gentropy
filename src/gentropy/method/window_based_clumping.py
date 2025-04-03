@@ -11,7 +11,8 @@ from pyspark.ml import functions as fml
 from pyspark.ml.linalg import DenseVector, VectorUDT
 from pyspark.sql.window import Window
 
-from gentropy.dataset.study_locus import StudyLocus
+from gentropy.config import WindowBasedClumpingStepConfig
+from gentropy.dataset.study_locus import StudyLocus, StudyLocusQualityCheck
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -151,23 +152,40 @@ class WindowBasedClumping:
 
         return DenseVector(is_lead)
 
-    @classmethod
+    @staticmethod
     def clump(
-        cls: type[WindowBasedClumping],
-        summary_stats: SummaryStatistics,
-        window_length: int,
-        p_value_significance: float = 5e-8,
+        unclumped_associations: SummaryStatistics | StudyLocus,
+        distance: int = WindowBasedClumpingStepConfig().distance,
     ) -> StudyLocus:
-        """Clump summary statistics by distance.
+        """Clump single point associations from summary statistics or study locus dataset based on window.
 
         Args:
-            summary_stats (SummaryStatistics): summary statistics to clump
-            window_length (int): window length in basepair
-            p_value_significance (float): only more significant variants are considered
+            unclumped_associations (SummaryStatistics | StudyLocus): Input dataset to be used for clumping. Assumes that the input dataset is already filtered for significant variants.
+            distance (int): Distance in base pairs to be used for clumping. Defaults to 500_000.
 
         Returns:
-            StudyLocus: clumped summary statistics
+            StudyLocus: clumped associations, where the clumped variants are flagged.
         """
+        # Quality check expression that flags variants that are not considered lead variant:
+        qc_check = f.col("semiIndices")[f.col("pvRank") - 1] <= 0
+
+        # The quality control expression will depend on the input dataset, as the column might be already present:
+        qc_expression = (
+            # When the column is already present and the condition is met, the value is appended to the array, otherwise keep as is:
+            f.when(
+                qc_check,
+                f.array_union(
+                    f.col("qualityControls"),
+                    f.array(f.lit(StudyLocusQualityCheck.WINDOW_CLUMPED.value)),
+                ),
+            ).otherwise(f.col("qualityControls"))
+            if "qualityControls" in unclumped_associations.df.columns
+            # If column is not there yet, initialize it with the flag value, or an empty array:
+            else f.when(
+                qc_check, f.array(f.lit(StudyLocusQualityCheck.WINDOW_CLUMPED.value))
+            ).otherwise(f.array().cast(t.ArrayType(t.StringType())))
+        )
+
         # Create window for locus clusters
         # - variants where the distance between subsequent variants is below the defined threshold.
         # - Variants are sorted by descending significance
@@ -177,18 +195,15 @@ class WindowBasedClumping:
 
         return StudyLocus(
             _df=(
-                summary_stats
-                # Dropping snps below significance - all subsequent steps are done on significant variants:
-                .pvalue_filter(p_value_significance)
-                .df
-                # Clustering summary variants for efficient windowing (complexity reduction):
+                unclumped_associations.df
+                # Clustering variants for efficient windowing (complexity reduction):
                 .withColumn(
                     "cluster_id",
                     WindowBasedClumping._cluster_peaks(
                         f.col("studyId"),
                         f.col("chromosome"),
                         f.col("position"),
-                        window_length,
+                        distance,
                     ),
                 )
                 # Within each cluster variants are ranked by significance:
@@ -205,7 +220,7 @@ class WindowBasedClumping:
                         ),
                     ).otherwise(f.array()),
                 )
-                # Get semi indices only ONCE per cluster:
+                # Collect top loci per cluster:
                 .withColumn(
                     "semiIndices",
                     f.when(
@@ -213,7 +228,7 @@ class WindowBasedClumping:
                         fml.vector_to_array(
                             f.udf(WindowBasedClumping._prune_peak, VectorUDT())(
                                 fml.array_to_vector(f.col("collectedPositions")),
-                                f.lit(window_length),
+                                f.lit(distance),
                             )
                         ),
                     ),
@@ -228,108 +243,16 @@ class WindowBasedClumping:
                         ),
                     ).otherwise(f.col("semiIndices")),
                 )
-                # Keeping semi indices only:
-                .filter(f.col("semiIndices")[f.col("pvRank") - 1] > 0)
-                .drop("pvRank", "collectedPositions", "semiIndices", "cluster_id")
                 # Adding study-locus id:
                 .withColumn(
                     "studyLocusId",
                     StudyLocus.assign_study_locus_id(
-                        f.col("studyId"), f.col("variantId")
+                        ["studyId", "variantId"]
                     ),
                 )
                 # Initialize QC column as array of strings:
-                .withColumn(
-                    "qualityControls", f.array().cast(t.ArrayType(t.StringType()))
-                )
+                .withColumn("qualityControls", qc_expression)
+                .drop("pvRank", "collectedPositions", "semiIndices", "cluster_id")
             ),
-            _schema=StudyLocus.get_schema(),
-        )
-
-    @classmethod
-    def clump_with_locus(
-        cls: type[WindowBasedClumping],
-        summary_stats: SummaryStatistics,
-        window_length: int,
-        p_value_significance: float = 5e-8,
-        p_value_baseline: float = 0.05,
-        locus_window_length: int | None = None,
-    ) -> StudyLocus:
-        """Clump significant associations while collecting locus around them.
-
-        Args:
-            summary_stats (SummaryStatistics): Input summary statistics dataset
-            window_length (int): Window size in  bp, used for distance based clumping.
-            p_value_significance (float): GWAS significance threshold used to filter peaks. Defaults to 5e-8.
-            p_value_baseline (float): Least significant threshold. Below this, all snps are dropped. Defaults to 0.05.
-            locus_window_length (int | None): The distance for collecting locus around the semi indices. Defaults to None.
-
-        Returns:
-            StudyLocus: StudyLocus after clumping with information about the `locus`
-        """
-        # If no locus window provided, using the same value:
-        if locus_window_length is None:
-            locus_window_length = window_length
-
-        # Run distance based clumping on the summary stats:
-        clumped_dataframe = WindowBasedClumping.clump(
-            summary_stats,
-            window_length=window_length,
-            p_value_significance=p_value_significance,
-        ).df.alias("clumped")
-
-        # Get list of columns from clumped dataset for further propagation:
-        clumped_columns = clumped_dataframe.columns
-
-        # Dropping variants not meeting the baseline criteria:
-        sumstats_baseline = summary_stats.pvalue_filter(p_value_baseline).df
-
-        # Renaming columns:
-        sumstats_baseline_renamed = sumstats_baseline.selectExpr(
-            *[f"{col} as tag_{col}" for col in sumstats_baseline.columns]
-        ).alias("sumstat")
-
-        study_locus_df = (
-            sumstats_baseline_renamed
-            # Joining the two datasets together:
-            .join(
-                f.broadcast(clumped_dataframe),
-                on=[
-                    (f.col("sumstat.tag_studyId") == f.col("clumped.studyId"))
-                    & (f.col("sumstat.tag_chromosome") == f.col("clumped.chromosome"))
-                    & (
-                        f.col("sumstat.tag_position")
-                        >= (f.col("clumped.position") - locus_window_length)
-                    )
-                    & (
-                        f.col("sumstat.tag_position")
-                        <= (f.col("clumped.position") + locus_window_length)
-                    )
-                ],
-                how="right",
-            )
-            .withColumn(
-                "locus",
-                f.struct(
-                    f.col("tag_variantId").alias("variantId"),
-                    f.col("tag_beta").alias("beta"),
-                    f.col("tag_pValueMantissa").alias("pValueMantissa"),
-                    f.col("tag_pValueExponent").alias("pValueExponent"),
-                    f.col("tag_standardError").alias("standardError"),
-                ),
-            )
-            .groupby("studyLocusId")
-            .agg(
-                *[
-                    f.first(col).alias(col)
-                    for col in clumped_columns
-                    if col != "studyLocusId"
-                ],
-                f.collect_list(f.col("locus")).alias("locus"),
-            )
-        )
-
-        return StudyLocus(
-            _df=study_locus_df,
             _schema=StudyLocus.get_schema(),
         )

@@ -18,38 +18,29 @@ For Google Cloud configuration:
 
 Check that you have the `make` utility installed, and if not (which is unlikely), install it using your system package manager.
 
-Check that you have `java` installed.
+!!! note "Java support"
+
+    Check that you have `java` installed. To be able to use all features including hail support use java 11 (for handling multiple java versions, consider using [`sdkman`](https://sdkman.io/)).
 
 ## Environment configuration
 
-Run `make setup-dev` to install/update the necessary packages and activate the development environment. You need to do this every time you open a new shell.
+Run `make setup-dev` to install/update the necessary packages (including required python version for development) and activate the development environment. You need to do it just once.
 
 It is recommended to use VS Code as an IDE for development.
 
-## How to run the code
+## How to create gentropy step
 
-All pipelines in this repository are intended to be run in Google Dataproc. Running them locally is not currently supported.
+All gentropy steps can be invoked after successful environment configuration by running
 
-In order to run the code:
+```bash
+uv run gentropy step=<step_name>
+```
 
-1. Manually edit your local `src/airflow/dags/*` file and comment out the steps you do not want to run.
+1. Create a new step config in the `src/gentropy/config.py` that inherits from `StepConfig` class.
 
-2. Manually edit your local `pyproject.toml` file and modify the version of the code.
+2. Register new step configuration to `ConfigStore`.
 
-   - This must be different from the version used by any other people working on the repository to avoid any deployment conflicts, so it's a good idea to use your name, for example: `1.2.3+jdoe`.
-   - You can also add a brief branch description, for example: `1.2.3+jdoe.myfeature`.
-   - Note that the version must comply with [PEP440 conventions](https://peps.python.org/pep-0440/#normalization), otherwise Poetry will not allow it to be deployed.
-   - Do not use underscores or hyphens in your version name. When building the WHL file, they will be automatically converted to dots, which means the file name will no longer match the version and the build will fail. Use dots instead.
-
-3. Manually edit your local `src/airflow/dags/common_airflow.py` and set `OTG_VERSION` to the same version as you did in the previous step.
-
-4. Run `make build`.
-
-   - This will create a bundle containing the neccessary code, configuration and dependencies to run the ETL pipeline, and then upload this bundle to Google Cloud.
-   - A version specific subpath is used, so uploading the code will not affect any branches but your own.
-   - If there was already a code bundle uploaded with the same version number, it will be replaced.
-
-5. Open Airflow UI and run the DAG.
+3. Create a step class that holds the business logic in new file in the `src/gentropy/{your_step_name}.py`.
 
 ## Contributing checklist
 
@@ -66,21 +57,54 @@ For more details on each of these steps, see the sections below.
 
 - If during development you had a question which wasn't covered in the documentation, and someone explained it to you, add it to the documentation. The same applies if you encountered any instructions in the documentation which were obsolete or incorrect.
 - Documentation autogeneration expressions start with `:::`. They will automatically generate sections of the documentation based on class and method docstrings. Be sure to update them for:
-  - Dataset definitions in `docs/python_api/datasource/STEP` (example: `docs/python_api/datasource/finngen/study_index.md`)
-  - Step definition in `docs/python_api/step/STEP.md` (example: `docs/python_api/step/finngen.md`)
+  - Datasource main page, for example: `docs/python_api/datasources/finngen/_finngen.md`
+  - Dataset definitions, for example: `docs/python_api/datasources/finngen/study_index.md`
+  - Step definition, for example: `docs/python_api/steps/finngen_sumstat_preprocess.md`
 
 ### Configuration
 
-- Input and output paths in `config/datasets/gcp.yaml`
-- Step configuration in `config/step/STEP.yaml` (example: `config/step/finngen.yaml`)
+- step default configuration in the `src/gentropy/config/` `StepConfig` derived classes.
 
 ### Classes
 
-- Dataset class in `src/gentropy/datasource/STEP` (example: `src/gentropy/datasource/finngen/study_index.py` → `FinnGenStudyIndex`)
-- Step main running class in `src/gentropy/STEP.py` (example: `src/gentropy/finngen.py`)
+- Datasource init, for example: `src/gentropy/datasource/finngen/__init__.py`
+- Dataset classes, for example: `src/gentropy/datasource/finngen/study_index.py` → `FinnGenStudyIndex`
+- Step main running class, for example: `src/gentropy/finngen_sumstat_preprocess.py`
 
 ### Tests
 
-- Test study fixture in `tests/conftest.py` (example: `mock_study_index_finngen` in that module)
-- Test sample data in `tests/data_samples` (example: `tests/gentropy/data_samples/finngen_studies_sample.json`)
-- Test definition in `tests/` (example: `tests/dataset/test_study_index.py` → `test_study_index_finngen_creation`)
+- Test study fixture in `tests/conftest.py`, for example: `mock_study_index_finngen` in that module
+- Test sample data, for example: `tests/gentropy/data_samples/finngen_studies_sample.json`
+- Test definition, for example: `tests/dataset/test_study_index.py` → `test_study_index_finngen_creation`)
+
+### Airflow dags
+
+- Upstream of version 2.0.0 airflow orchestration layer was moved to the [orchestration repository](https://github.com/opentargets/orchestration)
+
+### Support for python versions
+
+As of version 2.1.X gentropy supports multiple python versions. To ensure compatibility with all supported versions, unit tests are run for each of the minor python release from 3.10 to 3.12. Make sure your changes are compatible with all supported versions.
+
+### Development process
+
+The development follows simplified Git Flow process that includes usage of
+
+- `dev` (development branch)
+- `feature` branches
+- `main` (production branch)
+
+The development starts with creating new `feature` branch based on the `dev` branch. Once the feature is ready, the Pull Request for the `dev` branch is created and CI/CD Checks are performed to ensure that the code is compliant with the project conventions. Once the PR is approved, the feature branch is merged into the `dev` branch.
+
+#### Development releases
+
+One can create the dev release tagged by `vX.Y.Z-dev.V` tag. This release will not trigger the CI/CD pipeline to publish the package to the PyPi repository. The release is done by triggering the `Release` GitHub action.
+
+#### Production releases
+
+Once per week, the `Trigger PR for release` github action creates a Pull Request from `dev` to `main` branch, when the PR is approved, the `Release` GitHub action is triggered to create a production release tagged by `vX.Y.Z` tag. This release triggers the CI/CD pipeline to publish the package to the _TestPyPi_ repository. If it is successful, then the actual deployment to the _PyPI_ repository is done. The deployment to the PyPi repository must be verified by the gentropy maintainer.
+
+Below you can find a simplified diagram of the development process.
+
+<div align="center">
+  <img width="800" height="400" src="../../assets/imgs/development-flow.png" alt="development process">
+</div>
